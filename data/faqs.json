@@ -1,0 +1,114 @@
+[
+  {
+    "id": 1,
+    "question": "How does the consultation process work?",
+    "answer": "Our consultation process is simple and seamless. You can book an appointment online through our platform, and our relationship experts will guide you through each step. We begin with an initial assessment to understand your concerns, followed by personalized sessions tailored to your needs.",
+    "category": "consultation",
+    "icon": "rocket",
+    "tags": ["Process", "Booking", "Guidance"]
+  },
+  {
+    "id": 2,
+    "question": "What is the cost of a consultation?",
+    "answer": "We offer flexible pricing plans to suit different needs. Initial 30-minute sessions start at $79, with package discounts available for multiple sessions. We also provide sliding scale options for those in need. Contact our team for a personalized quote.",
+    "category": "consultation",
+    "icon": "star",
+    "tags": ["Pricing", "Plans", "Payment"]
+  },
+  {
+    "id": 3,
+    "question": "Are the consultations confidential?",
+    "answer": "Absolutely. All consultations are 100% confidential and protected by HIPAA compliance. Your privacy is our utmost priority. We use end-to-end encryption for all communications and secure storage for session notes. Our professionals are bound by strict confidentiality agreements.",
+    "category": "confidentiality",
+    "icon": "shield",
+    "tags": ["Privacy", "Security", "Trust"]
+  },
+  {
+    "id": 4,
+    "question": "How long does each consultation last?",
+    "answer": "Sessions typically last between 50 to 60 minutes to ensure we have ample time to address your concerns. We also offer 30-minute follow-up sessions and 90-minute intensive sessions for specific needs. The duration can be customized based on your requirements.",
+    "category": "appointment",
+    "icon": "clock",
+    "tags": ["Duration", "Timing", "Custom"]
+  },
+  {
+    "id": 5,
+    "question": "Can I reschedule or cancel my appointment?",
+    "answer": "Yes, you can reschedule or cancel your appointment up to 24 hours before the scheduled time without any charges. You can do this through your account dashboard or by contacting our support team. Late cancellations may incur a small fee as per our policy.",
+    "category": "appointment",
+    "icon": "calendar",
+    "tags": ["Reschedule", "Cancel", "Policy"]
+  },
+  {
+    "id": 6,
+    "question": "Do you offer virtual consultations?",
+    "answer": "Yes, we offer both in-person and virtual consultations through our secure video platform. Virtual sessions provide the same quality of care and are accessible from anywhere. All you need is a stable internet connection and a private space for the session.",
+    "category": "technical",
+    "icon": "video",
+    "tags": ["Virtual", "Online", "Remote"]
+  },
+  {
+    "id": 7,
+    "question": "What qualifications do your experts have?",
+    "answer": "Our team consists of licensed therapists, certified relationship coaches, and mental health professionals with extensive experience. All experts undergo rigorous vetting and continuous training to ensure the highest quality of service.",
+    "category": "consultation",
+    "icon": "userMd",
+    "tags": ["Experts", "Qualifications", "Quality"]
+  },
+  {
+    "id": 8,
+    "question": "Is there any preparation needed before a session?",
+    "answer": "No special preparation is needed. We recommend being in a quiet, comfortable space for virtual sessions and having a notebook handy if you wish to take notes. Some clients find it helpful to jot down key points they want to discuss.",
+    "category": "consultation",
+    "icon": "magic",
+    "tags": ["Preparation", "Tips", "Guide"]
+  },
+  {
+    "id": 9,
+    "question": "Can I choose my preferred expert?",
+    "answer": "Absolutely. You can browse expert profiles, read reviews, and select the professional who best aligns with your needs. If you're unsure, our matching algorithm can suggest experts based on your concerns and preferences.",
+    "category": "appointment",
+    "icon": "handHoldingHeart",
+    "tags": ["Choice", "Matching", "Preferences"]
+  },
+  {
+    "id": 10,
+    "question": "What if I need urgent support?",
+    "answer": "For urgent matters, we offer emergency sessions within 24 hours. Additionally, we provide 24/7 chat support and have partnerships with crisis helplines for immediate assistance when needed.",
+    "category": "confidentiality",
+    "icon": "headset",
+    "tags": ["Emergency", "Support", "Urgent"]
+  },
+  {
+    "id": 11,
+    "question": "Are sessions covered by insurance?",
+    "answer": "We work with several insurance providers and can help you verify coverage. Many of our services are eligible for reimbursement through HSA/FSA accounts. Our billing team can provide detailed information about your specific plan.",
+    "category": "consultation",
+    "icon": "heartbeat",
+    "tags": ["Insurance", "Payment", "Coverage"]
+  },
+  {
+    "id": 12,
+    "question": "How do I know if this is right for me?",
+    "answer": "We offer a free 15-minute consultation to help you understand our approach and determine if it's a good fit. This allows you to meet an expert, discuss your concerns, and ask any questions before committing to a full session.",
+    "category": "all",
+    "icon": "seedling",
+    "tags": ["Suitability", "Free Trial", "Assessment"]
+  },
+  {
+    "id": 13,
+    "question": "Can I switch experts if needed?",
+    "answer": "Yes, you can switch experts at any time. We believe the right match is crucial for progress. Our team will help you find another expert who might be a better fit for your needs and preferences.",
+    "category": "appointment",
+    "icon": "comments",
+    "tags": ["Switch", "Flexibility", "Match"]
+  },
+  {
+    "id": 14,
+    "question": "What technology do I need for virtual sessions?",
+    "answer": "You'll need a device with a camera and microphone (computer, tablet, or smartphone) and a stable internet connection. Our platform works on all modern browsers and has dedicated apps for iOS and Android.",
+    "category": "technical",
+    "icon": "leaf",
+    "tags": ["Technology", "Requirements", "Setup"]
+  }
+]

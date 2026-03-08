@@ -1,0 +1,16 @@
+{
+  "name": "relationship-match-server",
+  "version": "1.0.0",
+  "description": "Backend API for Relationship Match - counseling and booking",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.18.2",
+    "nodemailer": "^6.10.1"
+  }
+}

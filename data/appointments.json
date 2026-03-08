@@ -1,0 +1,28 @@
+[
+  {
+    "id": "1772979355528",
+    "name": "Kumar",
+    "email": "sushant5160kumar@gmail.com",
+    "phone": "7905977764",
+    "service": "Relationship Counseling",
+    "gender": "Male",
+    "message": "ok",
+    "date": "Wed Mar 11 2026",
+    "time": "10:00 AM",
+    "doctorId": null,
+    "createdAt": "2026-03-08T14:15:55.529Z"
+  },
+  {
+    "id": "1772981128778",
+    "name": "Sushant Kumar",
+    "email": "sushant5160kumar@gmail.com",
+    "phone": "7905977764",
+    "service": "Relationship Counseling",
+    "gender": "Male",
+    "message": "ok",
+    "date": "Thu Mar 12 2026",
+    "time": "12:00 PM",
+    "doctorId": null,
+    "createdAt": "2026-03-08T14:45:28.778Z"
+  }
+]
