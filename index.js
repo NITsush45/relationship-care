@@ -50,20 +50,70 @@ const PORT = process.env.PORT || 5000;
 const CONTACT_RECEIVER = process.env.CONTACT_RECEIVER || "sushiitantmi45@gmail.com";
 const EMAIL_USER = process.env.EMAIL_USER;
 const EMAIL_PASS = process.env.EMAIL_PASS;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const EMAIL_FROM = process.env.EMAIL_FROM || EMAIL_USER;
 
 function createTransporter() {
   if (!EMAIL_USER || !EMAIL_PASS) {
     return null;
   }
 
+  const port = Number(process.env.SMTP_PORT || 587);
+  const secure = String(process.env.SMTP_SECURE || "false") === "true";
+
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST || "smtp.gmail.com",
-    port: Number(process.env.SMTP_PORT || 465),
-    secure: String(process.env.SMTP_SECURE || "true") === "true",
+    port,
+    secure,
+    requireTLS: !secure,
     auth: {
       user: EMAIL_USER,
       pass: EMAIL_PASS,
     },
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 20000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 20000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 30000),
+  });
+}
+
+async function sendEmail({ to, replyTo, subject, text, html }) {
+  if (RESEND_API_KEY) {
+    const from = EMAIL_FROM || "onboarding@resend.dev";
+    const resp = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        reply_to: replyTo,
+        subject,
+        text,
+        html,
+      }),
+    });
+
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(`Resend failed: ${resp.status} ${msg}`);
+    }
+    return;
+  }
+
+  const transporter = createTransporter();
+  if (!transporter) {
+    throw new Error("Email is not configured. Set SMTP vars or RESEND_API_KEY.");
+  }
+
+  await transporter.sendMail({
+    from: EMAIL_FROM || EMAIL_USER,
+    to,
+    replyTo,
+    subject,
+    text,
+    html,
   });
 }
 
@@ -100,7 +150,26 @@ function generateLiveChatReply(userMessage) {
 }
 
 // Middleware
-app.use(cors({ origin: ["http://localhost:3000", "http://127.0.0.1:3000"] }));
+const corsAllowlist = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  ...(process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",").map((s) => s.trim().replace(/\/+$/, "")).filter(Boolean) : []),
+];
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      const normalizedOrigin = String(origin).replace(/\/+$/, "");
+      if (corsAllowlist.includes(normalizedOrigin)) return callback(null, true);
+
+      const isRailway = /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i.test(origin);
+      if (isRailway) return callback(null, true);
+
+      return callback(new Error("Not allowed by CORS"));
+    },
+  })
+);
 app.use(express.json());
 
 // ============== Contact ==============
@@ -112,12 +181,6 @@ app.post("/send-email", async (req, res) => {
       return res.status(400).json({ error: "Name, email and message are required" });
     }
 
-    const transporter = createTransporter();
-    if (!transporter) {
-      return res.status(500).json({
-        error: "Email is not configured. Set EMAIL_USER and EMAIL_PASS in server environment.",
-      });
-    }
 
     const safeMessage = String(message).replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const subject = `New Contact Message from ${name}`;
@@ -141,8 +204,7 @@ app.post("/send-email", async (req, res) => {
       <p>${safeMessage}</p>
     `;
 
-    await transporter.sendMail({
-      from: EMAIL_USER,
+    await sendEmail({
       to: CONTACT_RECEIVER,
       replyTo: email,
       subject,
@@ -198,12 +260,6 @@ app.post("/api/appointments", async (req, res) => {
       return res.status(400).json({ error: "Name, email and service are required" });
     }
 
-    const transporter = createTransporter();
-    if (!transporter) {
-      return res.status(500).json({
-        error: "Email is not configured. Set EMAIL_USER and EMAIL_PASS in server environment.",
-      });
-    }
 
     const safeMessage = String(message || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const subject = `New Appointment Booking from ${name}`;
@@ -235,8 +291,7 @@ app.post("/api/appointments", async (req, res) => {
       <p>${safeMessage}</p>
     `;
 
-    await transporter.sendMail({
-      from: EMAIL_USER,
+    await sendEmail({
       to: CONTACT_RECEIVER,
       replyTo: email,
       subject,
