@@ -531,10 +531,10 @@ app.get("/api/blog/interactions", async (req, res) => {
     const data = await getBlogInteractionsForUser(userId);
     return res.json(data);
   } catch (err) {
-    return res.status(500).json({ error: "Failed to load blog interactions" });
+    console.error("blog interactions error:", err);
+    return res.status(500).json({ error: "Failed to load blog interactions", details: err.message });
   }
 });
-
 app.post("/api/blog/:postId/like", async (req, res) => {
   try {
     const { user_id: userId } = req.body || {};
@@ -663,6 +663,8 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
 
 
 
