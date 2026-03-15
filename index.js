@@ -28,7 +28,6 @@
  */
 const express = require("express");
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
-require("dotenv").config({ path: require("path").join(__dirname, ".env.example") });
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const {
@@ -51,18 +50,22 @@ const CONTACT_RECEIVER = process.env.CONTACT_RECEIVER || "sushiitantmi45@gmail.c
 const EMAIL_USER = process.env.EMAIL_USER;
 const EMAIL_PASS = process.env.EMAIL_PASS;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || "Relationship Care";
 const EMAIL_FROM = process.env.EMAIL_FROM || EMAIL_USER;
 
 function createTransporter() {
   if (!EMAIL_USER || !EMAIL_PASS) {
     return null;
   }
-
   const port = Number(process.env.SMTP_PORT || 587);
   const secure = String(process.env.SMTP_SECURE || "false") === "true";
+  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+  const smtpFamilyRaw = process.env.SMTP_FAMILY;
+  const smtpFamily = smtpFamilyRaw ? Number(smtpFamilyRaw) : undefined;
 
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || "smtp.gmail.com",
+  const transportConfig = {
+    host: smtpHost,
     port,
     secure,
     requireTLS: !secure,
@@ -73,7 +76,16 @@ function createTransporter() {
     connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 20000),
     greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 20000),
     socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 30000),
-  });
+    tls: {
+      servername: smtpHost,
+    },
+  };
+
+  if (smtpFamily === 4 || smtpFamily === 6) {
+    transportConfig.family = smtpFamily;
+  }
+
+  return nodemailer.createTransport(transportConfig);
 }
 
 async function sendEmail({ to, replyTo, subject, text, html }) {
@@ -98,6 +110,35 @@ async function sendEmail({ to, replyTo, subject, text, html }) {
     if (!resp.ok) {
       const msg = await resp.text().catch(() => "");
       throw new Error(`Resend failed: ${resp.status} ${msg}`);
+    }
+    return;
+  }
+
+  if (BREVO_API_KEY) {
+    const from = EMAIL_FROM || EMAIL_USER;
+    if (!from) {
+      throw new Error("EMAIL_FROM is required when using BREVO_API_KEY");
+    }
+
+    const resp = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "api-key": BREVO_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        sender: { name: BREVO_SENDER_NAME, email: from },
+        to: [{ email: to }],
+        replyTo: replyTo ? { email: replyTo } : undefined,
+        subject,
+        textContent: text,
+        htmlContent: html,
+      }),
+    });
+
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(`Brevo failed: ${resp.status} ${msg}`);
     }
     return;
   }
@@ -527,9 +568,77 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "Relationship Match API is running" });
 });
 
+// Root helper (avoids "Cannot GET /")
+app.get("/", (req, res) => {
+  res.json({ ok: true, message: "Relationship Match API. Use /api/health" });
+});
+
+// Email health/config check
+app.get("/api/health/email", async (req, res) => {
+  const provider = RESEND_API_KEY
+    ? "resend"
+    : BREVO_API_KEY
+    ? "brevo"
+    : EMAIL_USER && EMAIL_PASS
+    ? "smtp"
+    : "none";
+
+  const smtpFamilyRaw = process.env.SMTP_FAMILY;
+
+
+  const details = {
+    provider,
+    hasResendKey: Boolean(RESEND_API_KEY),
+    hasBrevoKey: Boolean(BREVO_API_KEY),
+    hasSmtpUser: Boolean(EMAIL_USER),
+    hasSmtpPass: Boolean(EMAIL_PASS),
+    smtpHost: process.env.SMTP_HOST || "smtp.gmail.com",
+    smtpPort: Number(process.env.SMTP_PORT || 587),
+    smtpSecure: String(process.env.SMTP_SECURE || "false") === "true",
+    smtpFamily: smtpFamilyRaw ? Number(smtpFamilyRaw) : undefined,
+  };
+
+  if (provider === "none") {
+    return res.status(503).json({
+      ok: false,
+      error: "Email is not configured. Set RESEND_API_KEY or BREVO_API_KEY, or SMTP vars.",
+      details,
+    });
+  }
+
+  if (provider === "smtp") {
+    try {
+      const transporter = createTransporter();
+      await transporter.verify();
+      return res.json({ ok: true, provider, details });
+    } catch (err) {
+      return res.status(503).json({
+        ok: false,
+        provider,
+        error: "SMTP verify failed",
+        message: err.message,
+        details,
+      });
+    }
+  }
+
+  return res.json({ ok: true, provider, details });
+});
+
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
+
+
+
+
+
+
+
+
+
 
 
 
