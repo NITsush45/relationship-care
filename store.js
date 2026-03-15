@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { Pool } = require("pg");
 
 const DATA_DIR = path.join(__dirname, "data");
 const CONTACTS_FILE = path.join(DATA_DIR, "contacts.json");
@@ -7,6 +8,18 @@ const APPOINTMENTS_FILE = path.join(DATA_DIR, "appointments.json");
 const NEWSLETTER_FILE = path.join(DATA_DIR, "newsletter.json");
 const BLOG_STARS_FILE = path.join(DATA_DIR, "blogStars.json");
 const BLOG_DISCUSSIONS_FILE = path.join(DATA_DIR, "blogDiscussions.json");
+
+const DATABASE_URL = process.env.DATABASE_URL;
+const PGSSL_ENABLED =
+  String(process.env.PGSSL || "").toLowerCase() === "true" ||
+  String(process.env.PGSSLMODE || "").toLowerCase() === "require";
+
+const pool = DATABASE_URL
+  ? new Pool({
+      connectionString: DATABASE_URL,
+      ssl: PGSSL_ENABLED ? { rejectUnauthorized: false } : undefined,
+    })
+  : null;
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -40,89 +53,259 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
-function getContacts() {
-  return readJson(CONTACTS_FILE);
+async function initDatabase() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      problem TEXT,
+      message TEXT,
+      gender TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS appointments (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      phone TEXT,
+      service TEXT NOT NULL,
+      gender TEXT,
+      message TEXT,
+      date TEXT,
+      time TEXT,
+      doctor_id TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS newsletter_subscribers (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS blog_stars (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (post_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS blog_discussions (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
 }
 
-function addContact(contact) {
-  const contacts = getContacts();
+async function getContacts() {
+  if (!pool) return readJson(CONTACTS_FILE);
+  const { rows } = await pool.query(
+    "SELECT id, name, email, problem, message, gender, created_at FROM contacts ORDER BY created_at DESC"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    problem: r.problem || "",
+    message: r.message || "",
+    gender: r.gender || "",
+    createdAt: r.created_at,
+  }));
+}
+
+async function addContact(contact) {
   const newContact = {
     id: String(Date.now()),
     ...contact,
     createdAt: new Date().toISOString(),
   };
-  contacts.push(newContact);
-  writeJson(CONTACTS_FILE, contacts);
+
+  if (!pool) {
+    const contacts = await getContacts();
+    contacts.push(newContact);
+    writeJson(CONTACTS_FILE, contacts);
+    return newContact;
+  }
+
+  await pool.query(
+    "INSERT INTO contacts (id, name, email, problem, message, gender, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    [
+      newContact.id,
+      newContact.name,
+      newContact.email,
+      newContact.problem || "",
+      newContact.message || "",
+      newContact.gender || "",
+      newContact.createdAt,
+    ]
+  );
+
   return newContact;
 }
 
-function getAppointments() {
-  return readJson(APPOINTMENTS_FILE);
+async function getAppointments() {
+  if (!pool) return readJson(APPOINTMENTS_FILE);
+  const { rows } = await pool.query(
+    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, created_at FROM appointments ORDER BY created_at DESC"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    phone: r.phone || "",
+    service: r.service,
+    gender: r.gender || "",
+    message: r.message || "",
+    date: r.date || null,
+    time: r.time || null,
+    doctorId: r.doctor_id || null,
+    createdAt: r.created_at,
+  }));
 }
 
-function addAppointment(appointment) {
-  const appointments = getAppointments();
+async function addAppointment(appointment) {
   const newAppointment = {
     id: String(Date.now()),
     ...appointment,
     createdAt: new Date().toISOString(),
   };
-  appointments.push(newAppointment);
-  writeJson(APPOINTMENTS_FILE, appointments);
+
+  if (!pool) {
+    const appointments = await getAppointments();
+    appointments.push(newAppointment);
+    writeJson(APPOINTMENTS_FILE, appointments);
+    return newAppointment;
+  }
+
+  await pool.query(
+    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+    [
+      newAppointment.id,
+      newAppointment.name,
+      newAppointment.email,
+      newAppointment.phone || "",
+      newAppointment.service,
+      newAppointment.gender || "",
+      newAppointment.message || "",
+      newAppointment.date || null,
+      newAppointment.time || null,
+      newAppointment.doctorId || null,
+      newAppointment.createdAt,
+    ]
+  );
+
   return newAppointment;
 }
 
-function getNewsletterSubscribers() {
-  return readJson(NEWSLETTER_FILE);
+async function getNewsletterSubscribers() {
+  if (!pool) return readJson(NEWSLETTER_FILE);
+  const { rows } = await pool.query(
+    "SELECT id, email, created_at FROM newsletter_subscribers ORDER BY created_at DESC"
+  );
+  return rows.map((r) => ({ id: r.id, email: r.email, createdAt: r.created_at }));
 }
 
-function addNewsletterSubscriber(email) {
-  const list = getNewsletterSubscribers();
-  if (list.some((e) => e.email.toLowerCase() === email.toLowerCase())) {
+async function addNewsletterSubscriber(email) {
+  const normalized = String(email || "").trim();
+  if (!pool) {
+    const list = await getNewsletterSubscribers();
+    if (list.some((e) => e.email.toLowerCase() === normalized.toLowerCase())) {
+      return { id: null, subscribed: false, message: "Already subscribed" };
+    }
+    const entry = {
+      id: String(Date.now()),
+      email: normalized,
+      createdAt: new Date().toISOString(),
+    };
+    list.push(entry);
+    writeJson(NEWSLETTER_FILE, list);
+    return { id: entry.id, subscribed: true };
+  }
+
+  const exists = await pool.query(
+    "SELECT 1 FROM newsletter_subscribers WHERE LOWER(email) = LOWER($1) LIMIT 1",
+    [normalized]
+  );
+
+  if (exists.rowCount) {
     return { id: null, subscribed: false, message: "Already subscribed" };
   }
-  const entry = {
-    id: String(Date.now()),
-    email: email.trim(),
-    createdAt: new Date().toISOString(),
-  };
-  list.push(entry);
-  writeJson(NEWSLETTER_FILE, list);
-  return { id: entry.id, subscribed: true };
+
+  const id = String(Date.now());
+  await pool.query(
+    "INSERT INTO newsletter_subscribers (id, email, created_at) VALUES ($1,$2,$3)",
+    [id, normalized, new Date().toISOString()]
+  );
+  return { id, subscribed: true };
 }
 
-function getBlogStars() {
-  return readJson(BLOG_STARS_FILE);
+async function getBlogStars() {
+  if (!pool) return readJson(BLOG_STARS_FILE);
+  const { rows } = await pool.query(
+    "SELECT id, post_id, user_id, created_at FROM blog_stars"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    postId: r.post_id,
+    userId: r.user_id,
+    createdAt: r.created_at,
+  }));
 }
 
-function toggleBlogStar(postId, userId) {
-  const rows = getBlogStars();
+async function toggleBlogStar(postId, userId) {
   const normalizedPostId = String(postId);
   const normalizedUserId = String(userId);
 
-  const existingIndex = rows.findIndex(
-    (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+  if (!pool) {
+    const rows = await getBlogStars();
+    const existingIndex = rows.findIndex(
+      (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+    );
+
+    if (existingIndex >= 0) {
+      rows.splice(existingIndex, 1);
+      writeJson(BLOG_STARS_FILE, rows);
+      return { starred: false };
+    }
+
+    rows.push({
+      id: String(Date.now()),
+      postId: normalizedPostId,
+      userId: normalizedUserId,
+      createdAt: new Date().toISOString(),
+    });
+
+    writeJson(BLOG_STARS_FILE, rows);
+    return { starred: true };
+  }
+
+  const existing = await pool.query(
+    "SELECT id FROM blog_stars WHERE post_id = $1 AND user_id = $2 LIMIT 1",
+    [normalizedPostId, normalizedUserId]
   );
 
-  if (existingIndex >= 0) {
-    rows.splice(existingIndex, 1);
-    writeJson(BLOG_STARS_FILE, rows);
+  if (existing.rowCount) {
+    await pool.query("DELETE FROM blog_stars WHERE id = $1", [existing.rows[0].id]);
     return { starred: false };
   }
 
-  rows.push({
-    id: String(Date.now()),
-    postId: normalizedPostId,
-    userId: normalizedUserId,
-    createdAt: new Date().toISOString(),
-  });
+  await pool.query(
+    "INSERT INTO blog_stars (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
+    [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
+  );
 
-  writeJson(BLOG_STARS_FILE, rows);
   return { starred: true };
 }
 
-function getBlogInteractionsForUser(userId) {
-  const rows = getBlogStars();
+async function getBlogInteractionsForUser(userId) {
+  const rows = await getBlogStars();
   const starCounts = {};
   const starredPosts = {};
 
@@ -138,16 +321,29 @@ function getBlogInteractionsForUser(userId) {
   return { starCounts, starredPosts };
 }
 
-function getBlogDiscussions(postId) {
-  const rows = readJson(BLOG_DISCUSSIONS_FILE);
-  return rows
-    .filter((r) => String(r.postId) === String(postId))
-    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+async function getBlogDiscussions(postId) {
+  if (!pool) {
+    const rows = readJson(BLOG_DISCUSSIONS_FILE);
+    return rows
+      .filter((r) => String(r.postId) === String(postId))
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  }
+
+  const { rows } = await pool.query(
+    "SELECT id, post_id, user_id, text, created_at FROM blog_discussions WHERE post_id = $1 ORDER BY created_at ASC",
+    [String(postId)]
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    postId: r.post_id,
+    userId: r.user_id,
+    text: r.text,
+    createdAt: r.created_at,
+  }));
 }
 
-function addBlogDiscussion(postId, userId, text) {
-  const rows = readJson(BLOG_DISCUSSIONS_FILE);
-
+async function addBlogDiscussion(postId, userId, text) {
   const entry = {
     id: String(Date.now()),
     postId: String(postId),
@@ -156,12 +352,23 @@ function addBlogDiscussion(postId, userId, text) {
     createdAt: new Date().toISOString(),
   };
 
-  rows.push(entry);
-  writeJson(BLOG_DISCUSSIONS_FILE, rows);
+  if (!pool) {
+    const rows = readJson(BLOG_DISCUSSIONS_FILE);
+    rows.push(entry);
+    writeJson(BLOG_DISCUSSIONS_FILE, rows);
+    return entry;
+  }
+
+  await pool.query(
+    "INSERT INTO blog_discussions (id, post_id, user_id, text, created_at) VALUES ($1,$2,$3,$4,$5)",
+    [entry.id, entry.postId, entry.userId, entry.text, entry.createdAt]
+  );
+
   return entry;
 }
 
 module.exports = {
+  initDatabase,
   getContacts,
   addContact,
   getAppointments,

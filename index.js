@@ -31,6 +31,7 @@ require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const {
+  initDatabase,
   addContact,
   getContacts,
   addAppointment,
@@ -53,6 +54,10 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || "Relationship Care";
 const EMAIL_FROM = process.env.EMAIL_FROM || EMAIL_USER;
+
+initDatabase().catch((err) => {
+  console.error("Database init failed:", err);
+});
 
 function createTransporter() {
   if (!EMAIL_USER || !EMAIL_PASS) {
@@ -253,7 +258,7 @@ app.post("/send-email", async (req, res) => {
       html: htmlBody,
     });
 
-    const contact = addContact({
+    const contact = await addContact({
       name,
       email,
       problem: problem || "",
@@ -282,9 +287,9 @@ app.post("/api/live-chat/reply", (req, res) => {
   }
 });
 // GET /api/contacts - list contact messages (optional, for admin)
-app.get("/api/contacts", (req, res) => {
+app.get("/api/contacts", async (req, res) => {
   try {
-    const contacts = getContacts();
+    const contacts = await getContacts();
     res.json(contacts);
   } catch (err) {
     console.error("get contacts error:", err);
@@ -340,7 +345,7 @@ app.post("/api/appointments", async (req, res) => {
       html: htmlBody,
     });
 
-    const appointment = addAppointment({
+    const appointment = await addAppointment({
       name,
       email,
       phone: phone || "",
@@ -359,9 +364,9 @@ app.post("/api/appointments", async (req, res) => {
   }
 });
 // GET /api/appointments - list appointments (optional)
-app.get("/api/appointments", (req, res) => {
+app.get("/api/appointments", async (req, res) => {
   try {
-    const appointments = getAppointments();
+    const appointments = await getAppointments();
     res.json(appointments);
   } catch (err) {
     console.error("get appointments error:", err);
@@ -370,13 +375,13 @@ app.get("/api/appointments", (req, res) => {
 });
 
 // ============== Newsletter (Blog page / Footer) ==============
-app.post("/api/newsletter", (req, res) => {
+app.post("/api/newsletter", async (req, res) => {
   try {
     const { email } = req.body;
     if (!email || typeof email !== "string" || !email.trim()) {
       return res.status(400).json({ error: "Email is required" });
     }
-    const result = addNewsletterSubscriber(email.trim());
+    const result = await addNewsletterSubscriber(email.trim());
     if (result.subscribed) {
       res.status(201).json({ success: true, id: result.id });
     } else {
@@ -388,9 +393,9 @@ app.post("/api/newsletter", (req, res) => {
   }
 });
 
-app.get("/api/newsletter", (req, res) => {
+app.get("/api/newsletter", async (req, res) => {
   try {
-    const list = getNewsletterSubscribers();
+    const list = await getNewsletterSubscribers();
     res.json(list);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch subscribers" });
@@ -515,49 +520,49 @@ app.get("/api/blog", (req, res) => {
 });
 
 
-app.get("/api/blog/interactions", (req, res) => {
+app.get("/api/blog/interactions", async (req, res) => {
   try {
     const userId = req.query.user_id;
     if (!userId) {
       return res.status(400).json({ error: "user_id is required" });
     }
-    const data = getBlogInteractionsForUser(userId);
+    const data = await getBlogInteractionsForUser(userId);
     return res.json(data);
   } catch (err) {
     return res.status(500).json({ error: "Failed to load blog interactions" });
   }
 });
 
-app.post("/api/blog/:postId/star", (req, res) => {
+app.post("/api/blog/:postId/star", async (req, res) => {
   try {
     const { user_id: userId } = req.body || {};
     if (!userId) {
       return res.status(400).json({ error: "user_id is required" });
     }
-    const result = toggleBlogStar(req.params.postId, userId);
-    const counts = getBlogInteractionsForUser(userId);
+    const result = await toggleBlogStar(req.params.postId, userId);
+    const counts = await getBlogInteractionsForUser(userId);
     return res.json({ ...result, starCounts: counts.starCounts, starredPosts: counts.starredPosts });
   } catch (err) {
     return res.status(500).json({ error: "Failed to update star" });
   }
 });
 
-app.get("/api/blog/:postId/discussions", (req, res) => {
+app.get("/api/blog/:postId/discussions", async (req, res) => {
   try {
-    const items = getBlogDiscussions(req.params.postId);
+    const items = await getBlogDiscussions(req.params.postId);
     return res.json(items);
   } catch (err) {
     return res.status(500).json({ error: "Failed to fetch discussions" });
   }
 });
 
-app.post("/api/blog/:postId/discussions", (req, res) => {
+app.post("/api/blog/:postId/discussions", async (req, res) => {
   try {
     const { user_id: userId, text } = req.body || {};
     if (!userId || !text || !String(text).trim()) {
       return res.status(400).json({ error: "user_id and text are required" });
     }
-    const entry = addBlogDiscussion(req.params.postId, userId, String(text).trim());
+    const entry = await addBlogDiscussion(req.params.postId, userId, String(text).trim());
     return res.status(201).json(entry);
   } catch (err) {
     return res.status(500).json({ error: "Failed to add discussion" });
@@ -628,6 +633,11 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
+
+
+
 
 
 
