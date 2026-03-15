@@ -42,6 +42,8 @@ const {
   getBlogInteractionsForUser,
   getBlogDiscussions,
   addBlogDiscussion,
+  toggleBlogLike,
+  addBlogView,
   readStaticData,
 } = require("./store");
 
@@ -533,6 +535,34 @@ app.get("/api/blog/interactions", async (req, res) => {
   }
 });
 
+app.post("/api/blog/:postId/like", async (req, res) => {
+  try {
+    const { user_id: userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ error: "user_id is required" });
+    }
+    const result = await toggleBlogLike(req.params.postId, userId);
+    const counts = await getBlogInteractionsForUser(userId);
+    return res.json({ ...result, likeCounts: counts.likeCounts, likedPosts: counts.likedPosts });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update like" });
+  }
+});
+
+app.post("/api/blog/:postId/view", async (req, res) => {
+  try {
+    const { user_id: userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ error: "user_id is required" });
+    }
+    await addBlogView(req.params.postId, userId);
+    const counts = await getBlogInteractionsForUser(userId);
+    return res.json({ viewCounts: counts.viewCounts });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update view" });
+  }
+});
+
 app.post("/api/blog/:postId/star", async (req, res) => {
   try {
     const { user_id: userId } = req.body || {};
@@ -633,6 +663,8 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
 
 
 

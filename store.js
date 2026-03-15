@@ -8,6 +8,8 @@ const APPOINTMENTS_FILE = path.join(DATA_DIR, "appointments.json");
 const NEWSLETTER_FILE = path.join(DATA_DIR, "newsletter.json");
 const BLOG_STARS_FILE = path.join(DATA_DIR, "blogStars.json");
 const BLOG_DISCUSSIONS_FILE = path.join(DATA_DIR, "blogDiscussions.json");
+const BLOG_VIEWS_FILE = path.join(DATA_DIR, "blogViews.json");
+const BLOG_LIKES_FILE = path.join(DATA_DIR, "blogLikes.json");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const PGSSL_ENABLED =
@@ -100,6 +102,22 @@ async function initDatabase() {
       user_id TEXT NOT NULL,
       text TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS blog_views (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (post_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS blog_likes (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (post_id, user_id)
     );
   `);
 }
@@ -304,21 +322,149 @@ async function toggleBlogStar(postId, userId) {
   return { starred: true };
 }
 
+async function getBlogViews() {
+  if (!pool) return readJson(BLOG_VIEWS_FILE);
+  const { rows } = await pool.query(
+    "SELECT id, post_id, user_id, created_at FROM blog_views"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    postId: r.post_id,
+    userId: r.user_id,
+    createdAt: r.created_at,
+  }));
+}
+
+async function addBlogView(postId, userId) {
+  const normalizedPostId = String(postId);
+  const normalizedUserId = String(userId);
+
+  if (!pool) {
+    const rows = await getBlogViews();
+    const exists = rows.some(
+      (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+    );
+    if (!exists) {
+      rows.push({
+        id: String(Date.now()),
+        postId: normalizedPostId,
+        userId: normalizedUserId,
+        createdAt: new Date().toISOString(),
+      });
+      writeJson(BLOG_VIEWS_FILE, rows);
+    }
+    return { viewed: true };
+  }
+
+  const existing = await pool.query(
+    "SELECT id FROM blog_views WHERE post_id = $1 AND user_id = $2 LIMIT 1",
+    [normalizedPostId, normalizedUserId]
+  );
+  if (existing.rowCount) {
+    return { viewed: false };
+  }
+
+  await pool.query(
+    "INSERT INTO blog_views (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
+    [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
+  );
+
+  return { viewed: true };
+}
+
+async function getBlogLikes() {
+  if (!pool) return readJson(BLOG_LIKES_FILE);
+  const { rows } = await pool.query(
+    "SELECT id, post_id, user_id, created_at FROM blog_likes"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    postId: r.post_id,
+    userId: r.user_id,
+    createdAt: r.created_at,
+  }));
+}
+
+async function toggleBlogLike(postId, userId) {
+  const normalizedPostId = String(postId);
+  const normalizedUserId = String(userId);
+
+  if (!pool) {
+    const rows = await getBlogLikes();
+    const existingIndex = rows.findIndex(
+      (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+    );
+
+    if (existingIndex >= 0) {
+      rows.splice(existingIndex, 1);
+      writeJson(BLOG_LIKES_FILE, rows);
+      return { liked: false };
+    }
+
+    rows.push({
+      id: String(Date.now()),
+      postId: normalizedPostId,
+      userId: normalizedUserId,
+      createdAt: new Date().toISOString(),
+    });
+
+    writeJson(BLOG_LIKES_FILE, rows);
+    return { liked: true };
+  }
+
+  const existing = await pool.query(
+    "SELECT id FROM blog_likes WHERE post_id = $1 AND user_id = $2 LIMIT 1",
+    [normalizedPostId, normalizedUserId]
+  );
+
+  if (existing.rowCount) {
+    await pool.query("DELETE FROM blog_likes WHERE id = $1", [existing.rows[0].id]);
+    return { liked: false };
+  }
+
+  await pool.query(
+    "INSERT INTO blog_likes (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
+    [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
+  );
+
+  return { liked: true };
+}
+
 async function getBlogInteractionsForUser(userId) {
-  const rows = await getBlogStars();
+  const [stars, likes, views] = await Promise.all([
+    getBlogStars(),
+    getBlogLikes(),
+    getBlogViews(),
+  ]);
+
   const starCounts = {};
   const starredPosts = {};
+  const likeCounts = {};
+  const likedPosts = {};
+  const viewCounts = {};
 
-  rows.forEach((r) => {
+  stars.forEach((r) => {
     const key = String(r.postId);
     starCounts[key] = (starCounts[key] || 0) + 1;
-
     if (String(r.userId) === String(userId)) {
       starredPosts[key] = true;
     }
   });
 
-  return { starCounts, starredPosts };
+  likes.forEach((r) => {
+    const key = String(r.postId);
+    likeCounts[key] = (likeCounts[key] || 0) + 1;
+    if (String(r.userId) === String(userId)) {
+      likedPosts[key] = true;
+    }
+  });
+
+  views.forEach((r) => {
+    const key = String(r.postId);
+    viewCounts[key] = (viewCounts[key] || 0) + 1;
+  });
+
+  return { starCounts, starredPosts, likeCounts, likedPosts, viewCounts };
 }
 
 async function getBlogDiscussions(postId) {
@@ -376,6 +522,8 @@ module.exports = {
   getNewsletterSubscribers,
   addNewsletterSubscriber,
   toggleBlogStar,
+  toggleBlogLike,
+  addBlogView,
   getBlogInteractionsForUser,
   getBlogDiscussions,
   addBlogDiscussion,
