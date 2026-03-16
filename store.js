@@ -19,6 +19,7 @@ const PGSSL_ENABLED =
 const pool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
+      hostaddr: process.env.PGHOSTADDR || undefined,
       ssl: PGSSL_ENABLED ? { rejectUnauthorized: false } : undefined,
     })
   : null;
@@ -487,7 +488,6 @@ async function getBlogDiscussions(postId) {
     text: r.text,
     createdAt: r.created_at,
   }));
-}
 
 async function addBlogDiscussion(postId, userId, text) {
   const entry = {
