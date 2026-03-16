@@ -56,6 +56,16 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
+async function safeDbQuery(query, params) {
+  if (!pool) return null;
+  try {
+    return await pool.query(query, params);
+  } catch (err) {
+    console.error("DB query failed:", err.message);
+    return null;
+  }
+}
+
 async function initDatabase() {
   if (!pool) return;
   await pool.query(`
@@ -125,10 +135,11 @@ async function initDatabase() {
 
 async function getContacts() {
   if (!pool) return readJson(CONTACTS_FILE);
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, name, email, problem, message, gender, created_at FROM contacts ORDER BY created_at DESC"
   );
-  return rows.map((r) => ({
+  if (!result) return readJson(CONTACTS_FILE);
+  return result.rows.map((r) => ({
     id: r.id,
     name: r.name,
     email: r.email,
@@ -153,7 +164,7 @@ async function addContact(contact) {
     return newContact;
   }
 
-  await pool.query(
+  const result = await safeDbQuery(
     "INSERT INTO contacts (id, name, email, problem, message, gender, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
     [
       newContact.id,
@@ -166,15 +177,22 @@ async function addContact(contact) {
     ]
   );
 
+  if (!result) {
+    const contacts = await getContacts();
+    contacts.push(newContact);
+    writeJson(CONTACTS_FILE, contacts);
+  }
+
   return newContact;
 }
 
 async function getAppointments() {
   if (!pool) return readJson(APPOINTMENTS_FILE);
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, created_at FROM appointments ORDER BY created_at DESC"
   );
-  return rows.map((r) => ({
+  if (!result) return readJson(APPOINTMENTS_FILE);
+  return result.rows.map((r) => ({
     id: r.id,
     name: r.name,
     email: r.email,
@@ -203,7 +221,7 @@ async function addAppointment(appointment) {
     return newAppointment;
   }
 
-  await pool.query(
+  const result = await safeDbQuery(
     "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     [
       newAppointment.id,
@@ -220,15 +238,22 @@ async function addAppointment(appointment) {
     ]
   );
 
+  if (!result) {
+    const appointments = await getAppointments();
+    appointments.push(newAppointment);
+    writeJson(APPOINTMENTS_FILE, appointments);
+  }
+
   return newAppointment;
 }
 
 async function getNewsletterSubscribers() {
   if (!pool) return readJson(NEWSLETTER_FILE);
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, email, created_at FROM newsletter_subscribers ORDER BY created_at DESC"
   );
-  return rows.map((r) => ({ id: r.id, email: r.email, createdAt: r.created_at }));
+  if (!result) return readJson(NEWSLETTER_FILE);
+  return result.rows.map((r) => ({ id: r.id, email: r.email, createdAt: r.created_at }));
 }
 
 async function addNewsletterSubscriber(email) {
@@ -248,29 +273,60 @@ async function addNewsletterSubscriber(email) {
     return { id: entry.id, subscribed: true };
   }
 
-  const exists = await pool.query(
+  const exists = await safeDbQuery(
     "SELECT 1 FROM newsletter_subscribers WHERE LOWER(email) = LOWER($1) LIMIT 1",
     [normalized]
   );
+
+  if (!exists) {
+    const list = await getNewsletterSubscribers();
+    if (list.some((e) => e.email.toLowerCase() === normalized.toLowerCase())) {
+      return { id: null, subscribed: false, message: "Already subscribed" };
+    }
+    const entry = {
+      id: String(Date.now()),
+      email: normalized,
+      createdAt: new Date().toISOString(),
+    };
+    list.push(entry);
+    writeJson(NEWSLETTER_FILE, list);
+    return { id: entry.id, subscribed: true };
+  }
 
   if (exists.rowCount) {
     return { id: null, subscribed: false, message: "Already subscribed" };
   }
 
   const id = String(Date.now());
-  await pool.query(
+  const inserted = await safeDbQuery(
     "INSERT INTO newsletter_subscribers (id, email, created_at) VALUES ($1,$2,$3)",
     [id, normalized, new Date().toISOString()]
   );
+
+  if (!inserted) {
+    const list = await getNewsletterSubscribers();
+    if (list.some((e) => e.email.toLowerCase() === normalized.toLowerCase())) {
+      return { id: null, subscribed: false, message: "Already subscribed" };
+    }
+    const entry = {
+      id,
+      email: normalized,
+      createdAt: new Date().toISOString(),
+    };
+    list.push(entry);
+    writeJson(NEWSLETTER_FILE, list);
+  }
+
   return { id, subscribed: true };
 }
 
 async function getBlogStars() {
   if (!pool) return readJson(BLOG_STARS_FILE);
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, post_id, user_id, created_at FROM blog_stars"
   );
-  return rows.map((r) => ({
+  if (!result) return readJson(BLOG_STARS_FILE);
+  return result.rows.map((r) => ({
     id: r.id,
     postId: r.post_id,
     userId: r.user_id,
@@ -305,17 +361,40 @@ async function toggleBlogStar(postId, userId) {
     return { starred: true };
   }
 
-  const existing = await pool.query(
+  const existing = await safeDbQuery(
     "SELECT id FROM blog_stars WHERE post_id = $1 AND user_id = $2 LIMIT 1",
     [normalizedPostId, normalizedUserId]
   );
 
+  if (!existing) {
+    const rows = await getBlogStars();
+    const existingIndex = rows.findIndex(
+      (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+    );
+
+    if (existingIndex >= 0) {
+      rows.splice(existingIndex, 1);
+      writeJson(BLOG_STARS_FILE, rows);
+      return { starred: false };
+    }
+
+    rows.push({
+      id: String(Date.now()),
+      postId: normalizedPostId,
+      userId: normalizedUserId,
+      createdAt: new Date().toISOString(),
+    });
+
+    writeJson(BLOG_STARS_FILE, rows);
+    return { starred: true };
+  }
+
   if (existing.rowCount) {
-    await pool.query("DELETE FROM blog_stars WHERE id = $1", [existing.rows[0].id]);
+    await safeDbQuery("DELETE FROM blog_stars WHERE id = $1", [existing.rows[0].id]);
     return { starred: false };
   }
 
-  await pool.query(
+  await safeDbQuery(
     "INSERT INTO blog_stars (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
     [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
   );
@@ -325,10 +404,11 @@ async function toggleBlogStar(postId, userId) {
 
 async function getBlogViews() {
   if (!pool) return readJson(BLOG_VIEWS_FILE);
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, post_id, user_id, created_at FROM blog_views"
   );
-  return rows.map((r) => ({
+  if (!result) return readJson(BLOG_VIEWS_FILE);
+  return result.rows.map((r) => ({
     id: r.id,
     postId: r.post_id,
     userId: r.user_id,
@@ -357,15 +437,33 @@ async function addBlogView(postId, userId) {
     return { viewed: true };
   }
 
-  const existing = await pool.query(
+  const existing = await safeDbQuery(
     "SELECT id FROM blog_views WHERE post_id = $1 AND user_id = $2 LIMIT 1",
     [normalizedPostId, normalizedUserId]
   );
+
+  if (!existing) {
+    const rows = await getBlogViews();
+    const exists = rows.some(
+      (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+    );
+    if (!exists) {
+      rows.push({
+        id: String(Date.now()),
+        postId: normalizedPostId,
+        userId: normalizedUserId,
+        createdAt: new Date().toISOString(),
+      });
+      writeJson(BLOG_VIEWS_FILE, rows);
+    }
+    return { viewed: true };
+  }
+
   if (existing.rowCount) {
     return { viewed: false };
   }
 
-  await pool.query(
+  await safeDbQuery(
     "INSERT INTO blog_views (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
     [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
   );
@@ -375,10 +473,11 @@ async function addBlogView(postId, userId) {
 
 async function getBlogLikes() {
   if (!pool) return readJson(BLOG_LIKES_FILE);
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, post_id, user_id, created_at FROM blog_likes"
   );
-  return rows.map((r) => ({
+  if (!result) return readJson(BLOG_LIKES_FILE);
+  return result.rows.map((r) => ({
     id: r.id,
     postId: r.post_id,
     userId: r.user_id,
@@ -413,17 +512,40 @@ async function toggleBlogLike(postId, userId) {
     return { liked: true };
   }
 
-  const existing = await pool.query(
+  const existing = await safeDbQuery(
     "SELECT id FROM blog_likes WHERE post_id = $1 AND user_id = $2 LIMIT 1",
     [normalizedPostId, normalizedUserId]
   );
 
+  if (!existing) {
+    const rows = await getBlogLikes();
+    const existingIndex = rows.findIndex(
+      (r) => String(r.postId) === normalizedPostId && String(r.userId) === normalizedUserId
+    );
+
+    if (existingIndex >= 0) {
+      rows.splice(existingIndex, 1);
+      writeJson(BLOG_LIKES_FILE, rows);
+      return { liked: false };
+    }
+
+    rows.push({
+      id: String(Date.now()),
+      postId: normalizedPostId,
+      userId: normalizedUserId,
+      createdAt: new Date().toISOString(),
+    });
+
+    writeJson(BLOG_LIKES_FILE, rows);
+    return { liked: true };
+  }
+
   if (existing.rowCount) {
-    await pool.query("DELETE FROM blog_likes WHERE id = $1", [existing.rows[0].id]);
+    await safeDbQuery("DELETE FROM blog_likes WHERE id = $1", [existing.rows[0].id]);
     return { liked: false };
   }
 
-  await pool.query(
+  await safeDbQuery(
     "INSERT INTO blog_likes (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
     [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
   );
@@ -476,18 +598,26 @@ async function getBlogDiscussions(postId) {
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
   }
 
-  const { rows } = await pool.query(
+  const result = await safeDbQuery(
     "SELECT id, post_id, user_id, text, created_at FROM blog_discussions WHERE post_id = $1 ORDER BY created_at ASC",
     [String(postId)]
   );
 
-  return rows.map((r) => ({
+  if (!result) {
+    const rows = readJson(BLOG_DISCUSSIONS_FILE);
+    return rows
+      .filter((r) => String(r.postId) === String(postId))
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  }
+
+  return result.rows.map((r) => ({
     id: r.id,
     postId: r.post_id,
     userId: r.user_id,
     text: r.text,
     createdAt: r.created_at,
   }));
+}
 
 async function addBlogDiscussion(postId, userId, text) {
   const entry = {
@@ -505,10 +635,16 @@ async function addBlogDiscussion(postId, userId, text) {
     return entry;
   }
 
-  await pool.query(
+  const result = await safeDbQuery(
     "INSERT INTO blog_discussions (id, post_id, user_id, text, created_at) VALUES ($1,$2,$3,$4,$5)",
     [entry.id, entry.postId, entry.userId, entry.text, entry.createdAt]
   );
+
+  if (!result) {
+    const rows = readJson(BLOG_DISCUSSIONS_FILE);
+    rows.push(entry);
+    writeJson(BLOG_DISCUSSIONS_FILE, rows);
+  }
 
   return entry;
 }
