@@ -10,6 +10,7 @@ const BLOG_STARS_FILE = path.join(DATA_DIR, "blogStars.json");
 const BLOG_DISCUSSIONS_FILE = path.join(DATA_DIR, "blogDiscussions.json");
 const BLOG_VIEWS_FILE = path.join(DATA_DIR, "blogViews.json");
 const BLOG_LIKES_FILE = path.join(DATA_DIR, "blogLikes.json");
+const CUSTOM_TESTIMONIALS_FILE = path.join(DATA_DIR, "customTestimonials.json");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const PGSSL_ENABLED =
@@ -129,6 +130,13 @@ async function initDatabase() {
       user_id TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (post_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_testimonials (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      quote TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 }
@@ -649,6 +657,52 @@ async function addBlogDiscussion(postId, userId, text) {
   return entry;
 }
 
+async function getCustomTestimonials() {
+  if (!pool) return readJson(CUSTOM_TESTIMONIALS_FILE);
+  const result = await safeDbQuery(
+    "SELECT id, name, quote, created_at FROM custom_testimonials ORDER BY created_at DESC"
+  );
+  if (!result) return readJson(CUSTOM_TESTIMONIALS_FILE);
+  return result.rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    quote: r.quote,
+    createdAt: r.created_at,
+  }));
+}
+
+async function addCustomTestimonial({ name, quote }) {
+  const entry = {
+    id: String(Date.now()),
+    name: String(name || "Anonymous").trim() || "Anonymous",
+    quote: String(quote || "").trim(),
+    createdAt: new Date().toISOString(),
+  };
+
+  if (!entry.quote) {
+    throw new Error("quote is required");
+  }
+
+  if (!pool) {
+    const rows = readJson(CUSTOM_TESTIMONIALS_FILE);
+    rows.unshift(entry);
+    writeJson(CUSTOM_TESTIMONIALS_FILE, rows);
+    return entry;
+  }
+
+  const result = await safeDbQuery(
+    "INSERT INTO custom_testimonials (id, name, quote, created_at) VALUES ($1,$2,$3,$4)",
+    [entry.id, entry.name, entry.quote, entry.createdAt]
+  );
+
+  if (!result) {
+    const rows = readJson(CUSTOM_TESTIMONIALS_FILE);
+    rows.unshift(entry);
+    writeJson(CUSTOM_TESTIMONIALS_FILE, rows);
+  }
+
+  return entry;
+}
 module.exports = {
   initDatabase,
   getContacts,
@@ -663,5 +717,12 @@ module.exports = {
   getBlogInteractionsForUser,
   getBlogDiscussions,
   addBlogDiscussion,
+  getCustomTestimonials,
+  addCustomTestimonial,
   readStaticData,
 };
+
+
+
+
+

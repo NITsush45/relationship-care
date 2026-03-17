@@ -44,6 +44,8 @@ const {
   addBlogDiscussion,
   toggleBlogLike,
   addBlogView,
+  getCustomTestimonials,
+  addCustomTestimonial,
   readStaticData,
 } = require("./store");
 
@@ -451,6 +453,30 @@ app.get("/api/testimonials", (req, res) => {
   }
 });
 
+app.get("/api/testimonials/custom", async (req, res) => {
+  try {
+    const items = await getCustomTestimonials();
+    res.json(items);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load custom testimonials" });
+  }
+});
+
+app.post("/api/testimonials/custom", async (req, res) => {
+  try {
+    const { name, quote } = req.body || {};
+    if (!quote || !String(quote).trim()) {
+      return res.status(400).json({ error: "quote is required" });
+    }
+    const entry = await addCustomTestimonial({
+      name: String(name || "Anonymous").trim(),
+      quote: String(quote).trim(),
+    });
+    return res.status(201).json(entry);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to add testimonial" });
+  }
+});
 app.get("/api/process-steps", (req, res) => {
   try {
     const data = readStaticData("processSteps.json");
@@ -663,6 +689,10 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
+
+
 
 
 
