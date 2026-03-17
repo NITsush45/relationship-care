@@ -91,8 +91,21 @@ async function initDatabase() {
       date TEXT,
       time TEXT,
       doctor_id TEXT,
+      consultation_type TEXT,
+      consultation_fee INTEGER,
+      payment_provider TEXT,
+      payment_order_id TEXT,
+      payment_id TEXT,
+      payment_status TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS consultation_type TEXT;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS consultation_fee INTEGER;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_provider TEXT;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_order_id TEXT;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_id TEXT;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status TEXT;
 
     CREATE TABLE IF NOT EXISTS newsletter_subscribers (
       id TEXT PRIMARY KEY,
@@ -194,10 +207,45 @@ async function addContact(contact) {
   return newContact;
 }
 
-async function getAppointments() {
+
+async function getAppointmentById(id) {
+  const targetId = String(id);
+  if (!pool) {
+    const rows = await getAppointments();
+    return rows.find((r) => String(r.id) === targetId) || null;
+  }
+  const result = await safeDbQuery(
+    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, duration_hours, total_fee, receipt_number, payment_provider, payment_order_id, payment_id, payment_status, created_at FROM appointments WHERE id = $1 LIMIT 1",
+    [targetId]
+  );
+  if (!result || !result.rowCount) return null;
+  const r = result.rows[0];
+  return {
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    phone: r.phone || "",
+    service: r.service,
+    gender: r.gender || "",
+    message: r.message || "",
+    date: r.date || null,
+    time: r.time || null,
+    doctorId: r.doctor_id || null,
+    consultationType: r.consultation_type || null,
+    consultationFee: r.consultation_fee || null,
+    durationHours: r.duration_hours || null,
+    totalFee: r.total_fee || null,
+    receiptNumber: r.receipt_number || null,
+    paymentProvider: r.payment_provider || null,
+    paymentOrderId: r.payment_order_id || null,
+    paymentId: r.payment_id || null,
+    paymentStatus: r.payment_status || null,
+    createdAt: r.created_at,
+  };
+}async function getAppointments() {
   if (!pool) return readJson(APPOINTMENTS_FILE);
   const result = await safeDbQuery(
-    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, created_at FROM appointments ORDER BY created_at DESC"
+    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, duration_hours, total_fee, receipt_number, payment_provider, payment_order_id, payment_id, payment_status, created_at FROM appointments ORDER BY created_at DESC"
   );
   if (!result) return readJson(APPOINTMENTS_FILE);
   return result.rows.map((r) => ({
@@ -222,6 +270,15 @@ async function addAppointment(appointment) {
     createdAt: new Date().toISOString(),
   };
 
+  const durationHours = Number(newAppointment.durationHours || 1);
+  const feePerHour = Number(newAppointment.consultationFee || 0);
+  newAppointment.durationHours = Number.isNaN(durationHours) ? 1 : durationHours;
+  newAppointment.consultationFee = Number.isNaN(feePerHour) ? 0 : feePerHour;
+  newAppointment.totalFee =
+    Number(newAppointment.totalFee) || newAppointment.consultationFee * newAppointment.durationHours;
+  newAppointment.receiptNumber =
+    newAppointment.receiptNumber || `RCPT-${Date.now()}`;
+
   if (!pool) {
     const appointments = await getAppointments();
     appointments.push(newAppointment);
@@ -230,7 +287,7 @@ async function addAppointment(appointment) {
   }
 
   const result = await safeDbQuery(
-    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, duration_hours, total_fee, receipt_number, payment_provider, payment_order_id, payment_id, payment_status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
     [
       newAppointment.id,
       newAppointment.name,
@@ -708,6 +765,7 @@ module.exports = {
   getContacts,
   addContact,
   getAppointments,
+  getAppointmentById,
   addAppointment,
   getNewsletterSubscribers,
   addNewsletterSubscriber,
@@ -721,6 +779,14 @@ module.exports = {
   addCustomTestimonial,
   readStaticData,
 };
+
+
+
+
+
+
+
+
 
 
 

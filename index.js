@@ -30,6 +30,8 @@ const express = require("express");
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const cors = require("cors");
 const nodemailer = require("nodemailer");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
 const http = require("http");
 const { Server } = require("socket.io");
 const {
@@ -61,6 +63,11 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || "Relationship Care";
 const EMAIL_FROM = process.env.EMAIL_FROM || EMAIL_USER;
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const razorpay = RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET
+  ? new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET })
+  : null;
 
 initDatabase().catch((err) => {
   console.error("Database init failed:", err);
@@ -235,7 +242,6 @@ app.post("/send-email", async (req, res) => {
       return res.status(400).json({ error: "Name, email and message are required" });
     }
 
-
     const safeMessage = String(message).replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const subject = `New Contact Message from ${name}`;
     const textBody = [
@@ -280,40 +286,38 @@ app.post("/send-email", async (req, res) => {
     return res.status(500).json({ error: "Failed to send message", details: err.message });
   }
 });
-// ============== Live Chat Auto Reply ==============
-app.post("/api/live-chat/reply", (req, res) => {
-  try {
-    const { message } = req.body || {};
-    if (!message || typeof message !== "string" || !message.trim()) {
-      return res.status(400).json({ error: "Message is required" });
-    }
-    const reply = generateLiveChatReply(message.trim());
-    return res.status(200).json({ reply });
-  } catch (err) {
-    console.error("live-chat error:", err);
-    return res.status(500).json({ error: "Failed to generate chat reply" });
-  }
-});
-// GET /api/contacts - list contact messages (optional, for admin)
-app.get("/api/contacts", async (req, res) => {
-  try {
-    const contacts = await getContacts();
-    res.json(contacts);
-  } catch (err) {
-    console.error("get contacts error:", err);
-    res.status(500).json({ error: "Failed to fetch contacts" });
-  }
-});
-
 // ============== Appointments ==============
 // POST /api/appointments - create booking (used by BookAppointment)
 app.post("/api/appointments", async (req, res) => {
   try {
-    const { name, email, phone, service, gender, message, date, time, doctorId } = req.body;
+    const {
+      name,
+      email,
+      phone,
+      service,
+      gender,
+      message,
+      date,
+      time,
+      doctorId,
+      consultationType,
+      consultationFee,
+      durationHours,
+      totalFee,
+      receiptNumber,
+      paymentProvider,
+      paymentOrderId,
+      paymentId,
+      paymentStatus,
+    } = req.body;
     if (!name || !email || !service) {
       return res.status(400).json({ error: "Name, email and service are required" });
     }
 
+    const normalizedDuration = Number(durationHours || 1);
+    const normalizedFee = Number(consultationFee || 0);
+    const normalizedTotal = Number(totalFee || normalizedFee * normalizedDuration);
+    const safeReceipt = receiptNumber || `RCPT-${Date.now()}`;
 
     const safeMessage = String(message || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const subject = `New Appointment Booking from ${name}`;
@@ -322,6 +326,10 @@ app.post("/api/appointments", async (req, res) => {
       `Email: ${email}`,
       `Phone: ${phone || "Not provided"}`,
       `Service: ${service}`,
+      `Consultation: ${consultationType || "Not selected"} (Rs. ${normalizedFee} / hr)`,
+      `Duration: ${normalizedDuration} hour(s)`,
+      `Total: Rs. ${normalizedTotal}`,
+      `Receipt: ${safeReceipt}`,
       `Gender: ${gender || "Not provided"}`,
       `Date: ${date || "Not selected"}`,
       `Time: ${time || "Not selected"}`,
@@ -337,6 +345,10 @@ app.post("/api/appointments", async (req, res) => {
       <p><strong>Email:</strong> ${email}</p>
       <p><strong>Phone:</strong> ${phone || "Not provided"}</p>
       <p><strong>Service:</strong> ${service}</p>
+      <p><strong>Consultation:</strong> ${consultationType || "Not selected"} (Rs. ${normalizedFee} / hr)</p>
+      <p><strong>Duration:</strong> ${normalizedDuration} hour(s)</p>
+      <p><strong>Total:</strong> Rs. ${normalizedTotal}</p>
+      <p><strong>Receipt:</strong> ${safeReceipt}</p>
       <p><strong>Gender:</strong> ${gender || "Not provided"}</p>
       <p><strong>Date:</strong> ${date || "Not selected"}</p>
       <p><strong>Time:</strong> ${time || "Not selected"}</p>
@@ -363,6 +375,15 @@ app.post("/api/appointments", async (req, res) => {
       date: date || null,
       time: time || null,
       doctorId: doctorId || null,
+      consultationType: consultationType || null,
+      consultationFee: normalizedFee || null,
+      durationHours: normalizedDuration || null,
+      totalFee: normalizedTotal || null,
+      receiptNumber: safeReceipt || null,
+      paymentProvider: paymentProvider || null,
+      paymentOrderId: paymentOrderId || null,
+      paymentId: paymentId || null,
+      paymentStatus: paymentStatus || null,
     });
 
     return res.status(201).json({ success: true, id: appointment.id, appointment });
@@ -371,6 +392,7 @@ app.post("/api/appointments", async (req, res) => {
     return res.status(500).json({ error: "Failed to create appointment", details: err.message });
   }
 });
+
 // GET /api/appointments - list appointments (optional)
 app.get("/api/appointments", async (req, res) => {
   try {
@@ -381,7 +403,6 @@ app.get("/api/appointments", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch appointments" });
   }
 });
-
 // ============== Newsletter (Blog page / Footer) ==============
 app.post("/api/newsletter", async (req, res) => {
   try {
@@ -410,6 +431,51 @@ app.get("/api/newsletter", async (req, res) => {
   }
 });
 
+// ============== Payments (Razorpay) ==============
+app.post("/api/payments/razorpay/order", async (req, res) => {
+  try {
+    if (!razorpay) {
+      return res.status(503).json({ error: "Razorpay is not configured" });
+    }
+    const amount = Number(req.body?.amount);
+    const currency = String(req.body?.currency || "INR");
+    const receipt = String(req.body?.receipt || `rcpt_${Date.now()}`);
+    if (!amount || Number.isNaN(amount) || amount < 1) {
+      return res.status(400).json({ error: "amount is required" });
+    }
+    const order = await razorpay.orders.create({ amount, currency, receipt });
+    return res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: RAZORPAY_KEY_ID,
+    });
+  } catch (err) {
+    console.error("razorpay order error:", err.message);
+    return res.status(500).json({ error: "Failed to create order" });
+  }
+});
+
+app.post("/api/payments/razorpay/verify", async (req, res) => {
+  try {
+    if (!RAZORPAY_KEY_SECRET) {
+      return res.status(503).json({ error: "Razorpay is not configured" });
+    }
+    const { order_id: orderId, payment_id: paymentId, signature } = req.body || {};
+    if (!orderId || !paymentId || !signature) {
+      return res.status(400).json({ error: "Invalid payment payload" });
+    }
+    const body = `${orderId}|${paymentId}`;
+    const expected = crypto
+      .createHmac("sha256", RAZORPAY_KEY_SECRET)
+      .update(body)
+      .digest("hex");
+    const expectedBuf = Buffer.from(expected);\n    const actualBuf = Buffer.from(String(signature));\n    const isValid = expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf);
+    return res.json({ verified: isValid });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to verify payment" });
+  }
+});
 // ============== Static content APIs (served from server/data) ==============
 app.get("/api/services", (req, res) => {
   try {
@@ -742,6 +808,37 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
