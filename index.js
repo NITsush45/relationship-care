@@ -30,6 +30,8 @@ const express = require("express");
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const cors = require("cors");
 const nodemailer = require("nodemailer");
+const http = require("http");
+const { Server } = require("socket.io");
 const {
   initDatabase,
   addContact,
@@ -50,6 +52,7 @@ const {
 } = require("./store");
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const CONTACT_RECEIVER = process.env.CONTACT_RECEIVER || "sushiitantmi45@gmail.com";
 const EMAIL_USER = process.env.EMAIL_USER;
@@ -205,17 +208,18 @@ const corsAllowlist = [
   "http://127.0.0.1:3000",
   ...(process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",").map((s) => s.trim().replace(/\/+$/, "")).filter(Boolean) : []),
 ];
+const isOriginAllowed = (origin) => {
+  if (!origin) return true;
+  const normalizedOrigin = String(origin).replace(/\/+$/, "");
+  if (corsAllowlist.includes(normalizedOrigin)) return true;
+  const isRailway = /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i.test(origin);
+  return isRailway;
+};
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      const normalizedOrigin = String(origin).replace(/\/+$/, "");
-      if (corsAllowlist.includes(normalizedOrigin)) return callback(null, true);
-
-      const isRailway = /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i.test(origin);
-      if (isRailway) return callback(null, true);
-
+      if (isOriginAllowed(origin)) return callback(null, true);
       return callback(new Error("Not allowed by CORS"));
     },
   })
@@ -624,6 +628,55 @@ app.post("/api/blog/:postId/discussions", async (req, res) => {
     return res.status(500).json({ error: "Failed to add discussion" });
   }
 });
+const io = new Server(server, {
+  cors: {
+    origin(origin, callback) {
+      if (isOriginAllowed(origin)) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST"],
+  },
+});
+
+io.on("connection", (socket) => {
+  socket.on("join-room", ({ roomId, name, role }) => {
+    const safeRoom = String(roomId || "").trim();
+    if (!safeRoom) return;
+    socket.join(safeRoom);
+    socket.data.roomId = safeRoom;
+    socket.data.name = String(name || "Anonymous").trim() || "Anonymous";
+    socket.data.role = String(role || "guest").trim() || "guest";
+    socket.to(safeRoom).emit("chat:system", {
+      message: `${socket.data.name} joined the chat`,
+      at: new Date().toISOString(),
+    });
+  });
+
+  socket.on("chat:message", ({ roomId, message, name, role }) => {
+    const safeRoom = String(roomId || socket.data.roomId || "").trim();
+    const safeMessage = String(message || "").trim();
+    if (!safeRoom || !safeMessage) return;
+
+    io.to(safeRoom).emit("chat:message", {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      roomId: safeRoom,
+      name: String(name || socket.data.name || "Anonymous").trim() || "Anonymous",
+      role: String(role || socket.data.role || "guest").trim() || "guest",
+      message: safeMessage,
+      at: new Date().toISOString(),
+    });
+  });
+
+  socket.on("disconnect", () => {
+    const roomId = socket.data.roomId;
+    if (roomId) {
+      socket.to(roomId).emit("chat:system", {
+        message: `${socket.data.name || "Someone"} left the chat`,
+        at: new Date().toISOString(),
+      });
+    }
+  });
+});
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "Relationship Match API is running" });
@@ -689,6 +742,12 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+
+
+
+
+
 
 
 
