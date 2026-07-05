@@ -270,15 +270,6 @@ async function addAppointment(appointment) {
     createdAt: new Date().toISOString(),
   };
 
-  const durationHours = Number(newAppointment.durationHours || 1);
-  const feePerHour = Number(newAppointment.consultationFee || 0);
-  newAppointment.durationHours = Number.isNaN(durationHours) ? 1 : durationHours;
-  newAppointment.consultationFee = Number.isNaN(feePerHour) ? 0 : feePerHour;
-  newAppointment.totalFee =
-    Number(newAppointment.totalFee) || newAppointment.consultationFee * newAppointment.durationHours;
-  newAppointment.receiptNumber =
-    newAppointment.receiptNumber || `RCPT-${Date.now()}`;
-
   if (!pool) {
     const appointments = await getAppointments();
     appointments.push(newAppointment);
@@ -287,7 +278,7 @@ async function addAppointment(appointment) {
   }
 
   const result = await safeDbQuery(
-    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, duration_hours, total_fee, receipt_number, payment_provider, payment_order_id, payment_id, payment_status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     [
       newAppointment.id,
       newAppointment.name,
