@@ -106,6 +106,11 @@ async function initDatabase() {
     ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_order_id TEXT;
     ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_id TEXT;
     ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status TEXT;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS user_id TEXT;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS session_id TEXT;
+
+    ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id TEXT;
+    ALTER TABLE contacts ADD COLUMN IF NOT EXISTS session_id TEXT;
 
     CREATE TABLE IF NOT EXISTS newsletter_subscribers (
       id TEXT PRIMARY KEY,
@@ -151,6 +156,22 @@ async function initDatabase() {
       quote TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      ip_address TEXT,
+      user_agent TEXT,
+      status TEXT DEFAULT 'active',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_active TIMESTAMPTZ DEFAULT NOW(),
+      expires_at TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_session_id ON user_sessions(session_id);
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_status ON user_sessions(status);
   `);
 }
 
@@ -757,6 +778,7 @@ module.exports = {
   addContact,
   getAppointments,
   getAppointmentById,
+  getAppointmentsForUser,
   addAppointment,
   getNewsletterSubscribers,
   addNewsletterSubscriber,

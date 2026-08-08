@@ -32,12 +32,14 @@ const cors = require("cors");
 const nodemailer = require("nodemailer");
 const http = require("http");
 const { Server } = require("socket.io");
+const { clerkMiddleware, getAuth, clerkClient } = require("@clerk/express");
 const {
   initDatabase,
   addContact,
   getContacts,
   addAppointment,
   getAppointments,
+  getAppointmentsForUser,
   addNewsletterSubscriber,
   getNewsletterSubscribers,
   toggleBlogStar,
@@ -49,6 +51,10 @@ const {
   getCustomTestimonials,
   addCustomTestimonial,
   readStaticData,
+  getUserSession,
+  createUserSession,
+  updateUserSession,
+  cleanupExpiredSessions,
 } = require("./store");
 
 const app = express();
@@ -725,67 +731,3 @@ app.get("/api/health/email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
