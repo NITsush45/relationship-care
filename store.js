@@ -284,6 +284,89 @@ async function getAppointmentById(id) {
   }));
 }
 
+async function getAppointmentsForUser(userId) {
+  const normalizedUserId = String(userId || "").trim();
+
+  if (!normalizedUserId) {
+    return [];
+  }
+
+  if (!pool) {
+    const appointments = await getAppointments();
+
+    return appointments.filter(
+      (appointment) =>
+        String(appointment.userId || "") === normalizedUserId
+    );
+  }
+
+  const result = await safeDbQuery(
+    `
+      SELECT
+        id,
+        name,
+        email,
+        phone,
+        service,
+        gender,
+        message,
+        date,
+        time,
+        doctor_id,
+        consultation_type,
+        consultation_fee,
+        duration_hours,
+        total_fee,
+        receipt_number,
+        payment_provider,
+        payment_order_id,
+        payment_id,
+        payment_status,
+        user_id,
+        session_id,
+        created_at
+      FROM appointments
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+    `,
+    [normalizedUserId]
+  );
+
+  if (!result) {
+    const appointments = await getAppointments();
+
+    return appointments.filter(
+      (appointment) =>
+        String(appointment.userId || "") === normalizedUserId
+    );
+  }
+
+  return result.rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    phone: r.phone || "",
+    service: r.service,
+    gender: r.gender || "",
+    message: r.message || "",
+    date: r.date || null,
+    time: r.time || null,
+    doctorId: r.doctor_id || null,
+    consultationType: r.consultation_type || null,
+    consultationFee: r.consultation_fee || null,
+    durationHours: r.duration_hours || null,
+    totalFee: r.total_fee || null,
+    receiptNumber: r.receipt_number || null,
+    paymentProvider: r.payment_provider || null,
+    paymentOrderId: r.payment_order_id || null,
+    paymentId: r.payment_id || null,
+    paymentStatus: r.payment_status || null,
+    userId: r.user_id || null,
+    sessionId: r.session_id || null,
+    createdAt: r.created_at,
+  }));
+}
+
 async function addAppointment(appointment) {
   const newAppointment = {
     id: String(Date.now()),
