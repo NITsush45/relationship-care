@@ -9,9 +9,12 @@
     },
     "dependencies": {
         "@clerk/express": "^2.1.42",
+        "bcryptjs": "^3.0.3",
         "cors": "^2.8.5",
         "dotenv": "^16.6.1",
         "express": "^4.18.2",
+        "googleapis": "^176.0.0",
+        "jsonwebtoken": "^9.0.3",
         "nodemailer": "^6.10.1",
         "pg": "^8.11.5",
         "socket.io": "^4.7.5"
