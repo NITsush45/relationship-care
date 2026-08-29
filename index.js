@@ -615,31 +615,42 @@ app.use(express.json());
    AUTH HELPERS
 ========================================================= */
 
-function sanitizeUser(
-  user
-) {
+function sanitizeUser(user) {
   if (!user) {
     return null;
   }
 
+  const username =
+    user.username ||
+    "";
+
+  const firstName =
+    user.first_name ||
+    user.firstName ||
+    "";
+
+  const lastName =
+    user.last_name ||
+    user.lastName ||
+    "";
+
+  const fullName =
+    `${firstName} ${lastName}`.trim();
+
   return {
     id: user.id,
 
-    username:
-      user.username || null,
+    // Main username entered during signup
+    username: username,
 
-    email:
-      user.email,
+    // Also expose name so frontend can directly use user.name
+    name: username || fullName || user.email,
 
-    firstName:
-      user.first_name ||
-      user.firstName ||
-      "",
+    email: user.email,
 
-    lastName:
-      user.last_name ||
-      user.lastName ||
-      "",
+    firstName: firstName,
+
+    lastName: lastName,
 
     imageUrl:
       user.image_url ||
@@ -647,17 +658,17 @@ function sanitizeUser(
       "",
 
     role:
-      user.role || "user",
+      user.role ||
+      "user",
 
     provider:
-      user.provider || "local",
+      user.provider ||
+      "local",
   };
 }
 
 
-function createToken(
-  user
-) {
+function createToken(user) {
   if (!JWT_SECRET) {
     throw new Error(
       "JWT_SECRET is not configured"
@@ -676,15 +687,12 @@ function createToken(
       role:
         user.role || "user",
     },
-
     JWT_SECRET,
-
     {
       expiresIn: "7d",
     }
   );
 }
-
 
 function authenticateToken(
   req,
@@ -744,44 +752,50 @@ app.post(
         lastName,
       } = req.body || {};
 
-      if (
-        !username ||
-        !email ||
-        !password
-      ) {
+      // -----------------------------
+      // VALIDATION
+      // -----------------------------
+      if (!username || !email || !password) {
         return res.status(400).json({
+          success: false,
           error:
             "Username, email and password are required",
         });
       }
 
-      if (
-        String(username).trim().length <
-        3
-      ) {
-        return res.status(400).json({
-          error:
-            "Username must be at least 3 characters",
-        });
-      }
-
-      if (
-        String(password).length < 6
-      ) {
-        return res.status(400).json({
-          error:
-            "Password must be at least 6 characters",
-        });
-      }
+      const normalizedUsername =
+        String(username).trim();
 
       const normalizedEmail =
         String(email)
           .trim()
           .toLowerCase();
 
-      const normalizedUsername =
-        String(username).trim();
+      const normalizedFirstName =
+        String(firstName || "").trim();
 
+      const normalizedLastName =
+        String(lastName || "").trim();
+
+      if (normalizedUsername.length < 3) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Username must be at least 3 characters",
+        });
+      }
+
+      if (String(password).length < 6) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Password must be at least 6 characters",
+        });
+      }
+
+      // -----------------------------
+      // CHECK EXISTING USER
+      // -----------------------------
       const existing =
         await db.query(
           `
@@ -797,21 +811,26 @@ app.post(
           ]
         );
 
-      if (
-        existing.rows.length > 0
-      ) {
+      if (existing.rows.length > 0) {
         return res.status(409).json({
+          success: false,
           error:
             "Email or username already exists",
         });
       }
 
+      // -----------------------------
+      // HASH PASSWORD
+      // -----------------------------
       const passwordHash =
         await bcrypt.hash(
-          password,
+          String(password),
           12
         );
 
+      // -----------------------------
+      // CREATE USER
+      // -----------------------------
       const result =
         await db.query(
           `
@@ -841,24 +860,29 @@ app.post(
             normalizedUsername,
             normalizedEmail,
             passwordHash,
-            firstName || "",
-            lastName || "",
+            normalizedFirstName,
+            normalizedLastName,
           ]
         );
 
       const user =
         result.rows[0];
 
+      // -----------------------------
+      // CREATE JWT
+      // -----------------------------
       const token =
         createToken(user);
 
+      // -----------------------------
+      // RETURN USER
+      // -----------------------------
       return res.status(201).json({
         success: true,
 
         token,
 
-        user:
-          sanitizeUser(user),
+        user: sanitizeUser(user),
       });
     } catch (error) {
       console.error(
@@ -867,6 +891,7 @@ app.post(
       );
 
       return res.status(500).json({
+        success: false,
         error:
           "Failed to create account",
       });
@@ -894,16 +919,20 @@ app.post(
           email || username || ""
         ).trim();
 
-      if (
-        !identifier ||
-        !password
-      ) {
+      // -----------------------------
+      // VALIDATION
+      // -----------------------------
+      if (!identifier || !password) {
         return res.status(400).json({
+          success: false,
           error:
             "Username/email and password are required",
         });
       }
 
+      // -----------------------------
+      // FIND USER
+      // -----------------------------
       const result =
         await db.query(
           `
@@ -916,10 +945,9 @@ app.post(
           [identifier]
         );
 
-      if (
-        result.rows.length === 0
-      ) {
+      if (result.rows.length === 0) {
         return res.status(401).json({
+          success: false,
           error:
             "Invalid username/email or password",
         });
@@ -928,36 +956,49 @@ app.post(
       const user =
         result.rows[0];
 
+      // -----------------------------
+      // GOOGLE ACCOUNT CHECK
+      // -----------------------------
       if (!user.password_hash) {
         return res.status(401).json({
+          success: false,
           error:
             "This account uses Google login. Continue with Google.",
         });
       }
 
+      // -----------------------------
+      // PASSWORD CHECK
+      // -----------------------------
       const valid =
         await bcrypt.compare(
-          password,
+          String(password),
           user.password_hash
         );
 
       if (!valid) {
         return res.status(401).json({
+          success: false,
           error:
             "Invalid username/email or password",
         });
       }
 
+      // -----------------------------
+      // CREATE TOKEN
+      // -----------------------------
       const token =
         createToken(user);
 
+      // -----------------------------
+      // RETURN USER
+      // -----------------------------
       return res.json({
         success: true,
 
         token,
 
-        user:
-          sanitizeUser(user),
+        user: sanitizeUser(user),
       });
     } catch (error) {
       console.error(
@@ -966,6 +1007,7 @@ app.post(
       );
 
       return res.status(500).json({
+        success: false,
         error:
           "Failed to login",
       });
@@ -1312,20 +1354,21 @@ app.get(
           [req.user.id]
         );
 
-      if (
-        result.rows.length === 0
-      ) {
+      if (result.rows.length === 0) {
         return res.status(404).json({
+          success: false,
           error:
             "User not found",
         });
       }
 
+      const user =
+        result.rows[0];
+
       return res.json({
-        user:
-          sanitizeUser(
-            result.rows[0]
-          ),
+        success: true,
+
+        user: sanitizeUser(user),
       });
     } catch (error) {
       console.error(
@@ -1334,13 +1377,13 @@ app.get(
       );
 
       return res.status(500).json({
+        success: false,
         error:
           "Failed to get user",
       });
     }
   }
 );
-
 
 /* =========================================================
    AUTH – LOGOUT
