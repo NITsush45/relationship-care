@@ -17,9 +17,32 @@ const PGSSL_ENABLED =
   String(process.env.PGSSL || "").toLowerCase() === "true" ||
   String(process.env.PGSSLMODE || "").toLowerCase() === "require";
 
+// Parse connection string into individual parameters to avoid regex parsing issues
+function parseConnectionString(connStr) {
+  try {
+    const url = new URL(connStr);
+    return {
+      user: url.username ? decodeURIComponent(url.username) : undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
+      host: url.hostname || undefined,
+      port: url.port ? Number(url.port) : undefined,
+      database: url.pathname ? url.pathname.replace(/^\//, "") : undefined,
+    };
+  } catch (e) {
+    console.error("Failed to parse DATABASE_URL:", e.message);
+    return {};
+  }
+}
+
+const connParams = DATABASE_URL ? parseConnectionString(DATABASE_URL) : {};
+
 const pool = DATABASE_URL
   ? new Pool({
-      connectionString: DATABASE_URL,
+      user: process.env.PGUSER || connParams.user,
+      password: process.env.PGPASSWORD || connParams.password,
+      host: process.env.PGHOST || connParams.host,
+      port: Number(process.env.PGPORT || connParams.port || 5432),
+      database: process.env.PGDATABASE || connParams.database,
       hostaddr: process.env.PGHOSTADDR || undefined,
       ssl: PGSSL_ENABLED ? { rejectUnauthorized: false } : undefined,
     })

@@ -88,9 +88,31 @@ if (!databaseUrl) {
   console.warn("WARNING: DATABASE_URL is not configured.");
 }
 
-const db = new Pool({
-  connectionString: databaseUrl,
+// Parse connection string into individual parameters to avoid regex parsing issues
+function parseConnectionString(connStr) {
+  try {
+    const url = new URL(connStr);
+    return {
+      user: url.username ? decodeURIComponent(url.username) : undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
+      host: url.hostname || undefined,
+      port: url.port ? Number(url.port) : undefined,
+      database: url.pathname ? url.pathname.replace(/^\//, "") : undefined,
+    };
+  } catch (e) {
+    console.error("Failed to parse DATABASE_URL:", e.message);
+    return {};
+  }
+}
 
+const connParams = databaseUrl ? parseConnectionString(databaseUrl) : {};
+
+const db = new Pool({
+  user: process.env.PGUSER || connParams.user,
+  password: process.env.PGPASSWORD || connParams.password,
+  host: process.env.PGHOST || connParams.host,
+  port: Number(process.env.PGPORT || connParams.port || 5432),
+  database: process.env.PGDATABASE || connParams.database,
   ssl:
     String(process.env.PGSSL || "").toLowerCase() === "true"
       ? {
@@ -219,43 +241,50 @@ function verifyOAuthState(state) {
 ========================================================= */
 
 async function initAuthDatabase() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-      username VARCHAR(100) UNIQUE,
-      email VARCHAR(255) UNIQUE NOT NULL,
+        username VARCHAR(100) UNIQUE,
+        email VARCHAR(255) UNIQUE NOT NULL,
 
-      password_hash TEXT,
+        password_hash TEXT,
 
-      first_name VARCHAR(100),
-      last_name VARCHAR(100),
+        first_name VARCHAR(100),
+        last_name VARCHAR(100),
 
-      image_url TEXT,
+        image_url TEXT,
 
-      role VARCHAR(30) NOT NULL DEFAULT 'user',
+        role VARCHAR(30) NOT NULL DEFAULT 'user',
 
-      provider VARCHAR(30) NOT NULL DEFAULT 'local',
+        provider VARCHAR(30) NOT NULL DEFAULT 'local',
 
-      google_id VARCHAR(255) UNIQUE,
+        google_id VARCHAR(255) UNIQUE,
 
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
-  await db.query(`
-    CREATE INDEX IF NOT EXISTS idx_users_email
-    ON users(email);
-  `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_users_email
+      ON users(email);
+    `);
 
-  await db.query(`
-    CREATE INDEX IF NOT EXISTS idx_users_google_id
-    ON users(google_id);
-  `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_users_google_id
+      ON users(google_id);
+    `);
 
-  console.log("Authentication database initialized");
+    console.log("Authentication database initialized");
+  } catch (error) {
+    console.error("initAuthDatabase error:", error);
+    console.error("initAuthDatabase error message:", error.message);
+    console.error("initAuthDatabase error stack:", error.stack);
+    throw error;
+  }
 }
 
 
@@ -676,6 +705,31 @@ app.use(
 
 
 /* =========================================================
+   HEALTH CHECK
+========================================================= */
+
+app.get("/api/health", async (req, res) => {
+  try {
+    const result = await db.query("SELECT NOW() as time");
+    res.json({
+      success: true,
+      message: "Server is running",
+      database: "connected",
+      time: result.rows[0].time,
+    });
+  } catch (error) {
+    console.error("Health check error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Database connection failed",
+      error: error.message,
+      stack: error.stack,
+    });
+  }
+});
+
+
+/* =========================================================
    AUTH HELPERS
 ========================================================= */
 
@@ -953,11 +1007,23 @@ app.post(
         "Signup error:",
         error
       );
+      console.error(
+        "Signup error message:",
+        error.message
+      );
+      console.error(
+        "Signup error stack:",
+        error.stack
+      );
+      console.error(
+        "Signup error name:",
+        error.name
+      );
 
       return res.status(500).json({
         success: false,
         error:
-          "Failed to create account",
+          "Failed to create account: " + error.message,
       });
     }
   }
@@ -1069,11 +1135,23 @@ app.post(
         "Login error:",
         error
       );
+      console.error(
+        "Login error message:",
+        error.message
+      );
+      console.error(
+        "Login error stack:",
+        error.stack
+      );
+      console.error(
+        "Login error name:",
+        error.name
+      );
 
       return res.status(500).json({
         success: false,
         error:
-          "Failed to login",
+          "Failed to login: " + error.message,
       });
     }
   }
