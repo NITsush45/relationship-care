@@ -1,45 +1,3 @@
-/**
- * Relationship Care – Backend API
- *
- * Authentication:
- *   POST /api/auth/signup
- *   POST /api/auth/login
- *   GET  /api/auth/google
- *   GET  /api/auth/google/callback
- *   GET  /api/auth/me
- *   POST /api/auth/logout
- *
- * Other APIs:
- *   POST /send-email
- *   POST /api/appointments
- *   GET  /api/appointments
- *   POST /api/newsletter
- *   GET  /api/newsletter
- *
- *   GET /api/services
- *   GET /api/doctors
- *   GET /api/doctors/:serviceType
- *   GET /api/testimonials
- *   GET /api/process-steps
- *   GET /api/stats
- *   GET /api/team
- *   GET /api/booking-services
- *   GET /api/time-slots
- *   GET /api/faqs
- *   GET /api/blog
- *
- *   GET  /api/blog/interactions
- *   POST /api/blog/:postId/like
- *   POST /api/blog/:postId/view
- *   POST /api/blog/:postId/star
- *   GET  /api/blog/:postId/discussions
- *   POST /api/blog/:postId/discussions
- *
- *   POST /api/user/session
- *
- *   GET /api/health
- *   GET /api/health/email
- */
 
 const express = require("express");
 const path = require("path");
@@ -114,7 +72,10 @@ const GOOGLE_CLIENT_SECRET =
 
 const GOOGLE_REDIRECT_URI =
   process.env.GOOGLE_REDIRECT_URI ||
-  `http://localhost:${PORT}/api/auth/google/callback`;
+  process.env.GOOGLE_CALLBACK_URL || // backward compatibility
+  (process.env.RENDER_EXTERNAL_HOSTNAME
+    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/api/auth/google/callback`
+    : `http://localhost:${PORT}/api/auth/google/callback`);
 
 
 /* =========================================================
@@ -159,6 +120,97 @@ if (
   console.warn(
     "WARNING: Google OAuth environment variables are not fully configured."
   );
+}
+/* =========================================================
+   OAUTH STATE (CSRF PROTECTION)
+
+   The state parameter is signed with HMAC-SHA256 and carries
+   the role + a nonce + an issue timestamp. The callback only
+   accepts states we signed ourselves (within the TTL), so a
+   third party cannot forge or replay an OAuth start.
+========================================================= */
+
+const OAUTH_STATE_SECRET =
+  process.env.OAUTH_STATE_SECRET ||
+  process.env.JWT_SECRET ||
+  process.env.GOOGLE_CLIENT_SECRET ||
+  crypto.randomBytes(32).toString("hex");
+
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function safeTimingSafeEqual(valueA, valueB) {
+  const bufferA = Buffer.from(String(valueA));
+  const bufferB = Buffer.from(String(valueB));
+
+  if (bufferA.length !== bufferB.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(bufferA, bufferB);
+}
+
+function createOAuthState(role) {
+  const payload = Buffer.from(
+    JSON.stringify({
+      role: role === "therapist" ? "therapist" : "user",
+
+      nonce: crypto.randomBytes(16).toString("hex"),
+
+      issuedAt: Date.now(),
+    })
+  ).toString("base64url");
+
+  const signature = crypto
+    .createHmac("sha256", OAUTH_STATE_SECRET)
+    .update(payload)
+    .digest("base64url");
+
+  return `${payload}.${signature}`;
+}
+
+function verifyOAuthState(state) {
+  if (typeof state !== "string" || state.length === 0 || state.length > 1024) {
+    return null;
+  }
+
+  const separatorIndex = state.lastIndexOf(".");
+
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const payload = state.slice(0, separatorIndex);
+
+  const signature = state.slice(separatorIndex + 1);
+
+  const expectedSignature = crypto
+    .createHmac("sha256", OAUTH_STATE_SECRET)
+    .update(payload)
+    .digest("base64url");
+
+  if (!safeTimingSafeEqual(signature, expectedSignature)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8")
+    );
+
+    if (
+      !parsed ||
+      typeof parsed.issuedAt !== "number" ||
+      Date.now() - parsed.issuedAt > OAUTH_STATE_TTL_MS
+    ) {
+      return null;
+    }
+
+    return {
+      role: parsed.role === "therapist" ? "therapist" : "user",
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 
@@ -575,12 +627,17 @@ const isOriginAllowed = (
     return true;
   }
 
-  const isRailway =
+    const isRailway =
     /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i.test(
       origin
     );
 
-  return isRailway;
+  const isRender =
+    /^https:\/\/[a-z0-9-]+\.onrender\.com$/i.test(
+      origin
+    );
+
+  return isRailway || isRender;
 };
 
 
@@ -608,7 +665,14 @@ app.use(
 );
 
 
-app.use(express.json());
+app.use(
+  express.json({
+    // Keep the raw request body so payment-gateway webhook signatures can be verified.
+    verify(req, res, buf) {
+      req.rawBody = buf;
+    },
+  })
+);
 
 
 /* =========================================================
@@ -1025,11 +1089,15 @@ app.get(
   (req, res) => {
     try {
       if (!googleOAuth2Client) {
-        return res.status(500).json({
-          error:
-            "Google OAuth is not configured on the server",
-        });
+        return res.redirect(
+          `${FRONTEND_URL}/auth/callback?error=google_not_configured`
+        );
       }
+
+      const role =
+        req.query.role === "therapist"
+          ? "therapist"
+          : "user";
 
       const url =
         googleOAuth2Client.generateAuthUrl(
@@ -1044,6 +1112,8 @@ app.get(
 
             prompt:
               "select_account",
+
+            state: createOAuthState(role),
           }
         );
 
@@ -1071,18 +1141,37 @@ app.get(
   "/api/auth/google/callback",
   async (req, res) => {
     try {
+      // Google forwards errors here as well
+      // (e.g. the user cancelled the consent screen).
+      if (req.query.error) {
+        return res.redirect(
+          `${FRONTEND_URL}/auth/callback?error=google_access_denied`
+        );
+      }
+
       const { code } =
         req.query;
 
       if (!code) {
         return res.redirect(
-          `${FRONTEND_URL}/sign-in?error=google_code_missing`
+          `${FRONTEND_URL}/auth/callback?error=google_code_missing`
         );
       }
 
       if (!googleOAuth2Client) {
         return res.redirect(
-          `${FRONTEND_URL}/sign-in?error=google_not_configured`
+          `${FRONTEND_URL}/auth/callback?error=google_not_configured`
+        );
+      }
+
+      const verifiedState =
+        verifyOAuthState(
+          req.query.state
+        );
+
+      if (!verifiedState) {
+        return res.redirect(
+          `${FRONTEND_URL}/auth/callback?error=google_invalid_state`
         );
       }
 
@@ -1092,6 +1181,9 @@ app.get(
         await googleOAuth2Client.getToken(
           code
         );
+
+      const oauthState =
+        verifiedState.role;
 
       googleOAuth2Client.setCredentials(
         tokens
@@ -1112,7 +1204,7 @@ app.get(
 
       if (!data.email) {
         return res.redirect(
-          `${FRONTEND_URL}/sign-in?error=google_email_missing`
+          `${FRONTEND_URL}/auth/callback?error=google_email_missing`
         );
       }
 
@@ -1273,9 +1365,9 @@ app.get(
               $3,
               $4,
               $5,
-              'user',
+              $6,
               'google',
-              $6
+              $7
             )
             RETURNING *
             `,
@@ -1292,6 +1384,8 @@ app.get(
 
               data.picture ||
                 "",
+
+              oauthState,
 
               data.id,
             ]
@@ -1319,7 +1413,7 @@ app.get(
       );
 
       return res.redirect(
-        `${FRONTEND_URL}/sign-in?error=google_auth_failed`
+        `${FRONTEND_URL}/auth/callback?error=google_auth_failed`
       );
     }
   }
@@ -1600,6 +1694,8 @@ app.post(
         date,
         time,
         doctorId,
+        consultationType,
+        consultationFee,
       } = req.body;
 
       if (
@@ -1744,6 +1840,12 @@ app.post(
 
           doctorId:
             doctorId || null,
+
+          consultationType:
+            consultationType || null,
+
+          consultationFee:
+            consultationFee || null,
         });
 
       return res.status(201).json({
@@ -2500,6 +2602,492 @@ app.post(
 
 
 /* =========================================================
+   PAYMENTS — NovaPay (UPI payment gateway)
+   Session charges: Chat ₹30 · Call ₹50 · Video Call ₹80
+   Webhook URL to paste in the NovaPay dashboard:
+     https://relationship-care.onrender.com/api/payments/novapay/webhook
+   Env vars (server/.env):
+     NOVAPAY_API_KEY             – merchant API key from the NovaPay dashboard
+     NOVAPAY_WEBHOOK_SECRET      – webhook signing secret (HMAC-SHA256)
+     NOVAPAY_API_BASE            – optional (default https://api.nova-pay.in)
+     NOVAPAY_CREATE_PAYMENT_PATH – optional (default /v1/payments)
+   ========================================================= */
+
+const NOVAPAY_API_BASE = (
+  process.env.NOVAPAY_API_BASE || "https://api.nova-pay.in"
+).replace(/\/+$/, "");
+
+const NOVAPAY_CREATE_PAYMENT_PATH =
+  process.env.NOVAPAY_CREATE_PAYMENT_PATH || "/v1/payments";
+
+const NOVAPAY_API_KEY = process.env.NOVAPAY_API_KEY || "";
+
+const NOVAPAY_WEBHOOK_SECRET =
+  process.env.NOVAPAY_WEBHOOK_SECRET || "";
+
+const SERVER_PUBLIC_BASE = (
+  process.env.SERVER_PUBLIC_URL ||
+  "https://relationship-care.onrender.com"
+).replace(/\/+$/, "");
+
+const NOVAPAY_REDIRECT_URL = (
+  process.env.NOVAPAY_REDIRECT_URL ||
+  `${(process.env.FRONTEND_URL || "").replace(/\/+$/, "")}/book`
+).trim();
+
+const NOVAPAY_WEBHOOK_URL = `${SERVER_PUBLIC_BASE}/api/payments/novapay/webhook`;
+
+const CONSULTATION_FEES = {
+  chat: 30,
+  call: 50,
+  video: 80,
+};
+
+const CONSULTATION_LABELS = {
+  chat: "Chat Session",
+  call: "Call Session",
+  video: "Video Call Session",
+};
+
+app.post(
+  "/api/payments/novapay/create",
+  async (req, res) => {
+    try {
+      const {
+        name,
+        email,
+        phone,
+        service,
+        gender,
+        message,
+        date,
+        time,
+        doctorId,
+        consultationType,
+      } = req.body || {};
+
+      const typeKey = String(consultationType || "").toLowerCase();
+      const fee = CONSULTATION_FEES[typeKey];
+
+      if (!fee) {
+        return res.status(400).json({
+          error:
+            "consultationType must be one of: chat, call, video",
+        });
+      }
+
+      if (!name || !email || !service) {
+        return res.status(400).json({
+          error:
+            "Name, email and service are required",
+        });
+      }
+
+      if (!NOVAPAY_API_KEY) {
+        return res.status(503).json({
+          error:
+            "NovaPay is not configured on the server yet",
+
+          hint:
+            "Add NOVAPAY_API_KEY (and optionally NOVAPAY_WEBHOOK_SECRET / NOVAPAY_API_BASE) to server/.env and restart the server.",
+        });
+      }
+
+      const appointmentId = crypto.randomUUID();
+      const merchantOrderId = `APT-${appointmentId}`;
+
+      const appointment = await addAppointment({
+        id: appointmentId,
+
+        name,
+
+        email,
+
+        phone:
+          phone || "",
+
+        service,
+
+        gender:
+          gender || "",
+
+        message:
+          message || "",
+
+        date:
+          date || null,
+
+        time:
+          time || null,
+
+        doctorId:
+          doctorId || null,
+
+        consultationType: typeKey,
+
+        consultationFee: fee,
+
+        paymentProvider: "novapay",
+
+        paymentOrderId: merchantOrderId,
+
+        paymentStatus: "pending",
+      });
+
+      let checkoutUrl = null;
+      let gatewayPaymentId = null;
+      let gatewayError = null;
+
+      try {
+        const payload = {
+          order_id: merchantOrderId,
+
+          amount: fee,
+
+          currency: "INR",
+
+          description: `${CONSULTATION_LABELS[typeKey]} - ${service}`,
+
+          customer: {
+            name,
+
+            email,
+
+            phone:
+              phone || undefined,
+          },
+
+          redirect_url: NOVAPAY_REDIRECT_URL || undefined,
+
+          callback_url: NOVAPAY_WEBHOOK_URL,
+
+          metadata: {
+            appointmentId: appointment.id,
+
+            consultationType: typeKey,
+
+            service,
+          },
+        };
+
+        const apiResponse = await fetch(
+          `${NOVAPAY_API_BASE}${NOVAPAY_CREATE_PAYMENT_PATH}`,
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type": "application/json",
+
+              Authorization: `Bearer ${NOVAPAY_API_KEY}`,
+            },
+
+            body: JSON.stringify(payload),
+          }
+        );
+
+        const apiJson = await apiResponse
+          .json()
+          .catch(() => ({}));
+
+        if (!apiResponse.ok) {
+          gatewayError =
+            apiJson?.error?.message ||
+            apiJson?.message ||
+            `NovaPay API error (HTTP ${apiResponse.status})`;
+        } else {
+          checkoutUrl =
+            apiJson?.checkout_url ||
+            apiJson?.payment_url ||
+            apiJson?.data?.checkout_url ||
+            apiJson?.data?.payment_url ||
+            apiJson?.url ||
+            apiJson?.data?.url ||
+            null;
+
+          gatewayPaymentId =
+            apiJson?.id ||
+            apiJson?.payment_id ||
+            apiJson?.data?.id ||
+            apiJson?.data?.payment_id ||
+            null;
+
+          if (gatewayPaymentId) {
+            await updateAppointmentPayment({
+              orderId: merchantOrderId,
+
+              paymentId: gatewayPaymentId,
+            });
+          }
+        }
+      } catch (err) {
+        gatewayError = err.message;
+      }
+
+      if (!checkoutUrl) {
+        return res.status(502).json({
+          error:
+            "Could not start the NovaPay payment",
+
+          details:
+            gatewayError ||
+            "No checkout URL was returned. Check NOVAPAY_API_BASE / NOVAPAY_CREATE_PAYMENT_PATH in server/.env against your NovaPay dashboard docs.",
+
+          orderId: merchantOrderId,
+        });
+      }
+
+      return res.status(201).json({
+        success: true,
+
+        appointmentId: appointment.id,
+
+        orderId: merchantOrderId,
+
+        amount: fee,
+
+        consultationType: typeKey,
+
+        checkoutUrl,
+      });
+    } catch (error) {
+      console.error(
+        "novapay create payment error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Failed to create NovaPay payment",
+
+        details:
+          error.message,
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/payments/novapay/webhook",
+  async (req, res) => {
+    try {
+      const rawBody = req.rawBody
+        ? req.rawBody.toString("utf8")
+        : JSON.stringify(req.body || {});
+
+      if (NOVAPAY_WEBHOOK_SECRET) {
+        const provided = String(
+          req.headers["x-novapay-signature"] ||
+            req.headers["x-webhook-signature"] ||
+            ""
+        ).trim();
+
+        const expected = crypto
+          .createHmac("sha256", NOVAPAY_WEBHOOK_SECRET)
+          .update(rawBody)
+          .digest("hex");
+
+        const a = Buffer.from(provided);
+        const b = Buffer.from(expected);
+
+        const signatureValid =
+          a.length === b.length &&
+          crypto.timingSafeEqual(a, b);
+
+        if (!signatureValid) {
+          console.warn(
+            "NovaPay webhook: signature verification failed"
+          );
+
+          return res.status(401).json({
+            error: "Invalid webhook signature",
+          });
+        }
+      } else {
+        console.warn(
+          "NovaPay webhook: NOVAPAY_WEBHOOK_SECRET is not set - skipping signature verification (dev mode)"
+        );
+      }
+
+      const event =
+        typeof req.body === "object" && req.body !== null
+          ? req.body
+          : (() => {
+              try {
+                return JSON.parse(rawBody || "{}");
+              } catch (_) {
+                return {};
+              }
+            })();
+
+      const data = event.data || event.payment || event;
+
+      const orderId =
+        data.order_id ||
+        data.orderId ||
+        data.merchant_order_id ||
+        event.order_id ||
+        null;
+
+      const paymentId =
+        data.id ||
+        data.payment_id ||
+        data.transaction_id ||
+        data.upi_transaction_id ||
+        event.payment_id ||
+        null;
+
+      const statusRaw = String(
+        data.status || event.status || ""
+      ).toLowerCase();
+
+      const eventType = String(
+        event.type || event.event || ""
+      ).toLowerCase();
+
+      const paid =
+        [
+          "paid",
+          "success",
+          "succeeded",
+          "completed",
+          "captured",
+          "settled",
+          "settlement",
+          "payment.success",
+          "payment.captured",
+          "payment.settled",
+        ].includes(statusRaw) ||
+        [
+          "payment.success",
+          "payment.captured",
+          "payment.settled",
+        ].includes(eventType);
+
+      const failed =
+        [
+          "failed",
+          "failure",
+          "cancelled",
+          "canceled",
+          "expired",
+          "payment.failed",
+        ].includes(statusRaw) ||
+        ["payment.failed"].includes(eventType);
+
+      if (!orderId) {
+        return res.json({
+          received: true,
+
+          ignored:
+            "no order reference in payload",
+        });
+      }
+
+      if (paid) {
+        const updated = await updateAppointmentPayment({
+          orderId,
+
+          paymentId,
+
+          status: "paid",
+
+          provider: "novapay",
+        });
+
+        return res.json({
+          received: true,
+
+          status: "paid",
+
+          updated: Boolean(updated),
+        });
+      }
+
+      if (failed) {
+        const updated = await updateAppointmentPayment({
+          orderId,
+
+          paymentId,
+
+          status: "failed",
+
+          provider: "novapay",
+        });
+
+        return res.json({
+          received: true,
+
+          status: "failed",
+
+          updated: Boolean(updated),
+        });
+      }
+
+      return res.json({
+        received: true,
+
+        ignored: `unhandled status '${statusRaw || eventType}'`,
+      });
+    } catch (error) {
+      console.error(
+        "novapay webhook error:",
+        error
+      );
+
+      // Always acknowledge so the gateway does not retry endlessly.
+      return res.status(200).json({ received: true });
+    }
+  }
+);
+
+app.get(
+  "/api/payments/novapay/status/:orderId",
+  async (req, res) => {
+    try {
+      const appointment =
+        await getAppointmentByPaymentOrderId(
+          req.params.orderId
+        );
+
+      if (!appointment) {
+        return res.status(404).json({
+          error: "Order not found",
+        });
+      }
+
+      return res.json({
+        orderId: req.params.orderId,
+
+        appointmentId: appointment.id,
+
+        paymentStatus:
+          appointment.paymentStatus || "pending",
+
+        paymentId:
+          appointment.paymentId || null,
+
+        consultationType:
+          appointment.consultationType || null,
+
+        consultationFee:
+          appointment.consultationFee || null,
+      });
+    } catch (error) {
+      console.error(
+        "novapay status error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Failed to check payment status",
+      });
+    }
+  }
+);
+
+
+/* =========================================================
    SOCKET.IO
 ========================================================= */
 
@@ -2550,9 +3138,31 @@ io.on(
           return;
         }
 
-        socket.join(
-          safeRoom
-        );
+        // Switching rooms? Leave the previous one and say goodbye there.
+        const previousRoom =
+          socket.data.roomId;
+
+        if (
+          previousRoom &&
+          previousRoom !== safeRoom
+        ) {
+          socket.leave(
+            previousRoom
+          );
+
+          socket
+            .to(previousRoom)
+            .emit(
+              "chat:system",
+              {
+                message:
+                  `${socket.data.name || "Someone"} left the chat`,
+
+                at:
+                  new Date().toISOString(),
+              }
+            );
+        }
 
         socket.data.roomId =
           safeRoom;
@@ -2571,18 +3181,72 @@ io.on(
           ).trim() ||
           "guest";
 
+        // Only announce the join to others the first time.
+        if (
+          !socket.rooms.has(safeRoom)
+        ) {
+          socket.join(
+            safeRoom
+          );
+
+          socket
+            .to(safeRoom)
+            .emit(
+              "chat:system",
+              {
+                message:
+                  `${socket.data.name} joined the chat`,
+
+                at:
+                  new Date().toISOString(),
+              }
+            );
+        }
+
+        // Confirm the join back to the user themself.
+        socket.emit(
+          "chat:system",
+          {
+            message:
+              `You joined the room "${safeRoom}"`,
+
+            at:
+              new Date().toISOString(),
+          }
+        );
+      }
+    );
+
+
+    socket.on(
+      "leave-room",
+      () => {
+        const roomId =
+          socket.data.roomId;
+
+        if (!roomId) {
+          return;
+        }
+
+        socket.leave(
+          roomId
+        );
+
         socket
-          .to(safeRoom)
+          .to(roomId)
           .emit(
             "chat:system",
             {
               message:
-                `${socket.data.name} joined the chat`,
+                `${socket.data.name || "Someone"} left the chat`,
 
               at:
                 new Date().toISOString(),
             }
           );
+
+        socket.data.roomId =
+          null;
       }
     );
 
@@ -2605,7 +3269,9 @@ io.on(
         const safeMessage =
           String(
             message || ""
-          ).trim();
+          )
+            .trim()
+            .slice(0, 1000);
 
         if (
           !safeRoom ||

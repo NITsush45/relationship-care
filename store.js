@@ -57,6 +57,16 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
+/** Collision-resistant id (Date.now() alone can repeat within the same millisecond,
+ *  which would make the blog_stars/blog_discussions INSERTs fail on PRIMARY KEY). */
+function genId() {
+  return (
+    String(Date.now()) +
+    "-" +
+    Math.random().toString(36).slice(2, 8)
+  );
+}
+
 async function safeDbQuery(query, params) {
   if (!pool) return null;
   try {
@@ -369,7 +379,7 @@ async function getAppointmentsForUser(userId) {
 
 async function addAppointment(appointment) {
   const newAppointment = {
-    id: String(Date.now()),
+    id: genId(),
     ...appointment,
     createdAt: new Date().toISOString(),
   };
@@ -382,7 +392,7 @@ async function addAppointment(appointment) {
   }
 
   const result = await safeDbQuery(
-    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+    "INSERT INTO appointments (id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, payment_provider, payment_order_id, payment_id, payment_status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
     [
       newAppointment.id,
       newAppointment.name,
@@ -394,6 +404,12 @@ async function addAppointment(appointment) {
       newAppointment.date || null,
       newAppointment.time || null,
       newAppointment.doctorId || null,
+      newAppointment.consultationType || null,
+      newAppointment.consultationFee || null,
+      newAppointment.paymentProvider || null,
+      newAppointment.paymentOrderId || null,
+      newAppointment.paymentId || null,
+      newAppointment.paymentStatus || null,
       newAppointment.createdAt,
     ]
   );
@@ -405,6 +421,112 @@ async function addAppointment(appointment) {
   }
 
   return newAppointment;
+}
+
+function mapAppointmentRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    phone: r.phone || "",
+    service: r.service,
+    gender: r.gender || "",
+    message: r.message || "",
+    date: r.date || null,
+    time: r.time || null,
+    doctorId: r.doctor_id || null,
+    consultationType: r.consultation_type || null,
+    consultationFee: r.consultation_fee || null,
+    durationHours: r.duration_hours || null,
+    totalFee: r.total_fee || null,
+    receiptNumber: r.receipt_number || null,
+    paymentProvider: r.payment_provider || null,
+    paymentOrderId: r.payment_order_id || null,
+    paymentId: r.payment_id || null,
+    paymentStatus: r.payment_status || null,
+    userId: r.user_id || null,
+    sessionId: r.session_id || null,
+    createdAt: r.created_at,
+  };
+}
+
+async function getAppointmentByPaymentOrderId(orderId) {
+  const normalizedOrderId = String(orderId || "");
+  if (!normalizedOrderId) return null;
+
+  if (!pool) {
+    const appointments = await getAppointments();
+    return (
+      appointments.find(
+        (a) => String(a.paymentOrderId) === normalizedOrderId
+      ) || null
+    );
+  }
+
+  const result = await safeDbQuery(
+    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, payment_provider, payment_order_id, payment_id, payment_status, created_at FROM appointments WHERE payment_order_id = $1 ORDER BY created_at DESC LIMIT 1",
+    [normalizedOrderId]
+  );
+
+  if (!result) {
+    const appointments = await getAppointments();
+    return (
+      appointments.find(
+        (a) => String(a.paymentOrderId) === normalizedOrderId
+      ) || null
+    );
+  }
+
+  if (!result.rows || !result.rows.length) return null;
+  return mapAppointmentRow(result.rows[0]);
+}
+
+async function updateAppointmentPayment({
+  orderId,
+  paymentId,
+  status,
+  provider,
+}) {
+  const normalizedOrderId = String(orderId || "");
+  if (!normalizedOrderId) return null;
+
+  const nextProvider = provider ? String(provider) : null;
+  const nextPaymentId = paymentId ? String(paymentId) : null;
+  const nextStatus = status ? String(status) : null;
+
+  if (!pool) {
+    const appointments = await getAppointments();
+    const appointment = appointments.find(
+      (a) => String(a.paymentOrderId) === normalizedOrderId
+    );
+    if (!appointment) return null;
+    if (nextProvider) appointment.paymentProvider = nextProvider;
+    if (nextPaymentId) appointment.paymentId = nextPaymentId;
+    if (nextStatus) appointment.paymentStatus = nextStatus;
+    writeJson(APPOINTMENTS_FILE, appointments);
+    return appointment;
+  }
+
+  const result = await safeDbQuery(
+    "UPDATE appointments SET payment_provider = COALESCE($2, payment_provider), payment_id = COALESCE($3, payment_id), payment_status = COALESCE($4, payment_status) WHERE payment_order_id = $1 RETURNING id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, payment_provider, payment_order_id, payment_id, payment_status, created_at",
+    [normalizedOrderId, nextProvider, nextPaymentId, nextStatus]
+  );
+
+  if (!result) {
+    const appointments = await getAppointments();
+    const appointment = appointments.find(
+      (a) => String(a.paymentOrderId) === normalizedOrderId
+    );
+    if (!appointment) return null;
+    if (nextProvider) appointment.paymentProvider = nextProvider;
+    if (nextPaymentId) appointment.paymentId = nextPaymentId;
+    if (nextStatus) appointment.paymentStatus = nextStatus;
+    writeJson(APPOINTMENTS_FILE, appointments);
+    return appointment;
+  }
+
+  if (!result.rows || !result.rows.length) return null;
+  return mapAppointmentRow(result.rows[0]);
 }
 
 async function getNewsletterSubscribers() {
@@ -511,7 +633,7 @@ async function toggleBlogStar(postId, userId) {
     }
 
     rows.push({
-      id: String(Date.now()),
+      id: genId(),
       postId: normalizedPostId,
       userId: normalizedUserId,
       createdAt: new Date().toISOString(),
@@ -539,7 +661,7 @@ async function toggleBlogStar(postId, userId) {
     }
 
     rows.push({
-      id: String(Date.now()),
+      id: genId(),
       postId: normalizedPostId,
       userId: normalizedUserId,
       createdAt: new Date().toISOString(),
@@ -556,7 +678,7 @@ async function toggleBlogStar(postId, userId) {
 
   await safeDbQuery(
     "INSERT INTO blog_stars (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
-    [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
+    [genId(), normalizedPostId, normalizedUserId, new Date().toISOString()]
   );
 
   return { starred: true };
@@ -587,7 +709,7 @@ async function addBlogView(postId, userId) {
     );
     if (!exists) {
       rows.push({
-        id: String(Date.now()),
+        id: genId(),
         postId: normalizedPostId,
         userId: normalizedUserId,
         createdAt: new Date().toISOString(),
@@ -609,7 +731,7 @@ async function addBlogView(postId, userId) {
     );
     if (!exists) {
       rows.push({
-        id: String(Date.now()),
+        id: genId(),
         postId: normalizedPostId,
         userId: normalizedUserId,
         createdAt: new Date().toISOString(),
@@ -625,7 +747,7 @@ async function addBlogView(postId, userId) {
 
   await safeDbQuery(
     "INSERT INTO blog_views (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
-    [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
+    [genId(), normalizedPostId, normalizedUserId, new Date().toISOString()]
   );
 
   return { viewed: true };
@@ -662,7 +784,7 @@ async function toggleBlogLike(postId, userId) {
     }
 
     rows.push({
-      id: String(Date.now()),
+      id: genId(),
       postId: normalizedPostId,
       userId: normalizedUserId,
       createdAt: new Date().toISOString(),
@@ -690,7 +812,7 @@ async function toggleBlogLike(postId, userId) {
     }
 
     rows.push({
-      id: String(Date.now()),
+      id: genId(),
       postId: normalizedPostId,
       userId: normalizedUserId,
       createdAt: new Date().toISOString(),
@@ -707,7 +829,7 @@ async function toggleBlogLike(postId, userId) {
 
   await safeDbQuery(
     "INSERT INTO blog_likes (id, post_id, user_id, created_at) VALUES ($1,$2,$3,$4)",
-    [String(Date.now()), normalizedPostId, normalizedUserId, new Date().toISOString()]
+    [genId(), normalizedPostId, normalizedUserId, new Date().toISOString()]
   );
 
   return { liked: true };
@@ -781,7 +903,7 @@ async function getBlogDiscussions(postId) {
 
 async function addBlogDiscussion(postId, userId, text) {
   const entry = {
-    id: String(Date.now()),
+    id: genId(),
     postId: String(postId),
     userId: String(userId),
     text: String(text),
@@ -825,7 +947,7 @@ async function getCustomTestimonials() {
 
 async function addCustomTestimonial({ name, quote }) {
   const entry = {
-    id: String(Date.now()),
+    id: genId(),
     name: String(name || "Anonymous").trim() || "Anonymous",
     quote: String(quote || "").trim(),
     createdAt: new Date().toISOString(),
@@ -863,6 +985,8 @@ module.exports = {
   getAppointmentById,
   getAppointmentsForUser,
   addAppointment,
+  getAppointmentByPaymentOrderId,
+  updateAppointmentPayment,
   getNewsletterSubscribers,
   addNewsletterSubscriber,
   toggleBlogStar,
