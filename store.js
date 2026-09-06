@@ -11,6 +11,7 @@ const BLOG_DISCUSSIONS_FILE = path.join(DATA_DIR, "blogDiscussions.json");
 const BLOG_VIEWS_FILE = path.join(DATA_DIR, "blogViews.json");
 const BLOG_LIKES_FILE = path.join(DATA_DIR, "blogLikes.json");
 const CUSTOM_TESTIMONIALS_FILE = path.join(DATA_DIR, "customTestimonials.json");
+const THERAPIST_PROFILES_FILE = path.join(DATA_DIR, "therapistProfiles.json");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const PGSSL_ENABLED =
@@ -190,21 +191,14 @@ async function initDatabase() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS user_sessions (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      ip_address TEXT,
-      user_agent TEXT,
-      status TEXT DEFAULT 'active',
+    CREATE TABLE IF NOT EXISTS therapist_profiles (
+      user_id TEXT PRIMARY KEY,
+      specialization TEXT,
+      age INTEGER,
+      mood TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW(),
-      last_active TIMESTAMPTZ DEFAULT NOW(),
-      expires_at TIMESTAMPTZ
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
-
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_session_id ON user_sessions(session_id);
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_status ON user_sessions(status);
   `);
 }
 
@@ -552,7 +546,124 @@ async function updateAppointmentPayment({
   return mapAppointmentRow(result.rows[0]);
 }
 
-async function getNewsletterSubscribers() {
+async function getTherapistProfile(userId) {
+  const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return null;
+
+  if (!pool) {
+    const profiles = readJson(THERAPIST_PROFILES_FILE);
+    return profiles.find((p) => String(p.userId) === normalizedUserId) || null;
+  }
+
+  const result = await safeDbQuery(
+    "SELECT user_id, specialization, age, mood, created_at, updated_at FROM therapist_profiles WHERE user_id = $1 LIMIT 1",
+    [normalizedUserId]
+  );
+  if (!result) {
+    const profiles = readJson(THERAPIST_PROFILES_FILE);
+    return profiles.find((p) => String(p.userId) === normalizedUserId) || null;
+  }
+  if (!result.rows.length) return null;
+  const r = result.rows[0];
+  return {
+    userId: r.user_id,
+    specialization: r.specialization,
+    age: r.age,
+    mood: r.mood,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+async function saveTherapistProfile({ userId, specialization, age, mood }) {
+  const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return null;
+
+  const profile = {
+    userId: normalizedUserId,
+    specialization: String(specialization || ""),
+    age: age ? Number(age) : null,
+    mood: String(mood || ""),
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (!pool) {
+    const profiles = readJson(THERAPIST_PROFILES_FILE);
+    const existingIndex = profiles.findIndex((p) => String(p.userId) === normalizedUserId);
+    if (existingIndex >= 0) {
+      profile.createdAt = profiles[existingIndex].createdAt;
+      profiles[existingIndex] = profile;
+    } else {
+      profile.createdAt = new Date().toISOString();
+      profiles.push(profile);
+    }
+    writeJson(THERAPIST_PROFILES_FILE, profiles);
+    return profile;
+  }
+
+  const existing = await safeDbQuery(
+    "SELECT 1 FROM therapist_profiles WHERE user_id = $1 LIMIT 1",
+    [normalizedUserId]
+  );
+
+  if (existing && existing.rowCount) {
+    const result = await safeDbQuery(
+      "UPDATE therapist_profiles SET specialization = $2, age = $3, mood = $4, updated_at = $5 WHERE user_id = $1 RETURNING user_id, specialization, age, mood, created_at, updated_at",
+      [normalizedUserId, profile.specialization, profile.age, profile.mood, profile.updatedAt]
+    );
+    if (result && result.rows.length) {
+      const r = result.rows[0];
+      return {
+        userId: r.user_id,
+        specialization: r.specialization,
+        age: r.age,
+        mood: r.mood,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      };
+    }
+  } else {
+    const result = await safeDbQuery(
+      "INSERT INTO therapist_profiles (user_id, specialization, age, mood, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$5) RETURNING user_id, specialization, age, mood, created_at, updated_at",
+      [normalizedUserId, profile.specialization, profile.age, profile.mood, new Date().toISOString()]
+    );
+    if (result && result.rows.length) {
+      const r = result.rows[0];
+      return {
+        userId: r.user_id,
+        specialization: r.specialization,
+        age: r.age,
+        mood: r.mood,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      };
+    }
+  }
+
+  // Fallback to file
+  const profiles = readJson(THERAPIST_PROFILES_FILE);
+  const existingIndex = profiles.findIndex((p) => String(p.userId) === normalizedUserId);
+  if (existingIndex >= 0) {
+    profile.createdAt = profiles[existingIndex].createdAt;
+    profiles[existingIndex] = profile;
+  } else {
+    profile.createdAt = new Date().toISOString();
+    profiles.push(profile);
+  }
+  writeJson(THERAPIST_PROFILES_FILE, profiles);
+  return profile;
+}
+
+async function getAppointmentsForTherapist(specialization) {
+  const allAppointments = await getAppointments();
+  if (!specialization) return allAppointments;
+  return allAppointments.filter(
+    (a) => (a.service || "").toLowerCase() === specialization.toLowerCase()
+  );
+}
+
+async function addNewsletterSubscriber(email) {
+}
   if (!pool) return readJson(NEWSLETTER_FILE);
   const result = await safeDbQuery(
     "SELECT id, email, created_at FROM newsletter_subscribers ORDER BY created_at DESC"
@@ -1000,6 +1111,83 @@ async function addCustomTestimonial({ name, quote }) {
 
   return entry;
 }
+async function getTherapistProfile(userId) {
+  const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return null;
+
+  if (!pool) {
+    const profiles = readJson(THERAPIST_PROFILES_FILE);
+    return profiles.find((p) => String(p.userId) === normalizedUserId) || null;
+  }
+
+  const result = await safeDbQuery(
+    "SELECT user_id, specialization, age, mood, created_at FROM therapist_profiles WHERE user_id = $1 LIMIT 1",
+    [normalizedUserId]
+  );
+  if (!result) {
+    const profiles = readJson(THERAPIST_PROFILES_FILE);
+    return profiles.find((p) => String(p.userId) === normalizedUserId) || null;
+  }
+  if (!result.rows.length) return null;
+  const r = result.rows[0];
+  return {
+    userId: r.user_id,
+    specialization: r.specialization,
+    age: r.age,
+    mood: r.mood,
+    createdAt: r.created_at,
+  };
+}
+
+async function saveTherapistProfile({ userId, specialization, age, mood }) {
+  const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return null;
+
+  const profile = {
+    userId: normalizedUserId,
+    specialization: String(specialization || "").trim(),
+    age: Number(age) || null,
+    mood: String(mood || "").trim(),
+    createdAt: new Date().toISOString(),
+  };
+
+  if (!pool) {
+    const profiles = readJson(THERAPIST_PROFILES_FILE);
+    const idx = profiles.findIndex((p) => String(p.userId) === normalizedUserId);
+    if (idx >= 0) profiles[idx] = profile;
+    else profiles.push(profile);
+    writeJson(THERAPIST_PROFILES_FILE, profiles);
+    return profile;
+  }
+
+  const existing = await safeDbQuery(
+    "SELECT 1 FROM therapist_profiles WHERE user_id = $1 LIMIT 1",
+    [normalizedUserId]
+  );
+  if (existing && existing.rowCount) {
+    await safeDbQuery(
+      "UPDATE therapist_profiles SET specialization = $2, age = $3, mood = $4 WHERE user_id = $1",
+      [normalizedUserId, profile.specialization, profile.age, profile.mood]
+    );
+  } else {
+    await safeDbQuery(
+      "INSERT INTO therapist_profiles (user_id, specialization, age, mood, created_at) VALUES ($1,$2,$3,$4,$5)",
+      [normalizedUserId, profile.specialization, profile.age, profile.mood, profile.createdAt]
+    );
+  }
+  return profile;
+}
+
+async function getAppointmentsForTherapist(specialization) {
+  const all = await getAppointments();
+  if (!specialization) return all;
+  const normalized = String(specialization).toLowerCase().trim();
+  return all.filter((a) => {
+    const svc = String(a.service || "").toLowerCase();
+    return svc.includes(normalized) || normalized.includes(svc);
+  });
+}
+
 module.exports = {
   initDatabase,
   getContacts,
@@ -1021,6 +1209,9 @@ module.exports = {
   getCustomTestimonials,
   addCustomTestimonial,
   readStaticData,
+  getTherapistProfile,
+  saveTherapistProfile,
+  getAppointmentsForTherapist,
 };
 
 

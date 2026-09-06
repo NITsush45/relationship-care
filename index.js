@@ -22,6 +22,7 @@ const {
   addAppointment,
   getAppointments,
   getAppointmentsForUser,
+  getAppointmentsForTherapist,
   addNewsletterSubscriber,
   getNewsletterSubscribers,
   toggleBlogStar,
@@ -30,8 +31,8 @@ const {
   addBlogDiscussion,
   toggleBlogLike,
   addBlogView,
-  getCustomTestimonials,
-  addCustomTestimonial,
+  getTherapistProfile,
+  saveTherapistProfile,
   readStaticData,
   getUserSession,
   createUserSession,
@@ -276,6 +277,21 @@ async function initAuthDatabase() {
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_users_google_id
       ON users(google_id);
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS therapist_profiles (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        specialization TEXT,
+        age INTEGER,
+        mood TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await db.query(`
+      ALTER TABLE therapist_profiles ADD COLUMN IF NOT EXISTS mood TEXT;
     `);
 
     console.log("Authentication database initialized");
@@ -1159,6 +1175,69 @@ app.post(
 
 
 /* =========================================================
+   THERAPIST PROFILE
+========================================================= */
+
+app.get(
+  "/api/therapist/profile",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      if (req.user.role !== "therapist") {
+        return res.status(403).json({ error: "Only therapists can access this" });
+      }
+      const profile = await getTherapistProfile(req.user.id);
+      return res.json({ success: true, profile });
+    } catch (error) {
+      console.error("Get therapist profile error:", error);
+      return res.status(500).json({ error: "Failed to fetch profile" });
+    }
+  }
+);
+
+app.post(
+  "/api/therapist/profile",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      if (req.user.role !== "therapist") {
+        return res.status(403).json({ error: "Only therapists can access this" });
+      }
+      const { specialization, age, mood } = req.body;
+      const profile = await saveTherapistProfile({
+        userId: req.user.id,
+        specialization: String(specialization || "").trim(),
+        age: String(age || "").trim(),
+        mood: String(mood || "").trim(),
+      });
+      return res.json({ success: true, profile });
+    } catch (error) {
+      console.error("Update therapist profile error:", error);
+      return res.status(500).json({ error: "Failed to update profile" });
+    }
+  }
+);
+
+app.get(
+  "/api/therapist/appointments",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      if (req.user.role !== "therapist") {
+        return res.status(403).json({ error: "Only therapists can access this" });
+      }
+      const profile = await getTherapistProfile(req.user.id);
+      const specialization = profile?.specialization || "";
+      const appointments = await getAppointmentsForTherapist(specialization);
+      return res.json(appointments);
+    } catch (error) {
+      console.error("Get therapist appointments error:", error);
+      return res.status(500).json({ error: "Failed to fetch appointments" });
+    }
+  }
+);
+
+/* =========================================================
    AUTH – GOOGLE START
 ========================================================= */
 
@@ -1758,6 +1837,64 @@ app.post(
    APPOINTMENTS
 ========================================================= */
 
+/* ========================================================= 
+   THERAPIST PROFILE & DASHBOARD
+========================================================= */
+
+app.get(
+  "/api/therapist/profile",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const profile = await getTherapistProfile(req.user.id);
+      return res.json({ profile });
+    } catch (error) {
+      console.error("get therapist profile error:", error);
+      return res.status(500).json({ error: "Failed to fetch profile" });
+    }
+  }
+);
+
+app.post(
+  "/api/therapist/profile",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { specialization, age, mood } = req.body;
+      if (!specialization) {
+        return res.status(400).json({ error: "Specialization is required" });
+      }
+      const profile = await saveTherapistProfile({
+        userId: req.user.id,
+        specialization,
+        age,
+        mood,
+      });
+      return res.json({ success: true, profile });
+    } catch (error) {
+      console.error("save therapist profile error:", error);
+      return res.status(500).json({ error: "Failed to save profile" });
+    }
+  }
+);
+
+app.get(
+  "/api/therapist/appointments",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const profile = await getTherapistProfile(req.user.id);
+      const appointments = await getAppointmentsForTherapist(
+        profile?.specialization
+      );
+      return res.json(appointments);
+    } catch (error) {
+      console.error("get therapist appointments error:", error);
+      return res.status(500).json({ error: "Failed to fetch appointments" });
+    }
+  }
+);
+
 app.post(
   "/api/appointments",
   async (req, res) => {
@@ -1972,6 +2109,61 @@ app.get(
         error:
           "Failed to fetch appointments",
       });
+    }
+  }
+);
+
+
+/* =========================================================
+   THERAPIST PROFILE & PATIENT LIST
+   ========================================================= */
+
+app.get(
+  "/api/therapist/profile",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const profile = await getTherapistProfile(req.user.id);
+      return res.json({ profile });
+    } catch (error) {
+      console.error("get therapist profile error:", error);
+      return res.status(500).json({ error: "Failed to fetch profile" });
+    }
+  }
+);
+
+app.put(
+  "/api/therapist/profile",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { specialization, age, mood } = req.body;
+      const profile = await saveTherapistProfile({
+        userId: req.user.id,
+        specialization,
+        age,
+        mood,
+      });
+      return res.json({ success: true, profile });
+    } catch (error) {
+      console.error("save therapist profile error:", error);
+      return res.status(500).json({ error: "Failed to save profile" });
+    }
+  }
+);
+
+app.get(
+  "/api/therapist/appointments",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const profile = await getTherapistProfile(req.user.id);
+      const specialization = profile?.specialization;
+      const appointments = await getAppointmentsForTherapist(specialization);
+      return res.json({ appointments, specialization });
+    } catch (error) {
+      console.error("get therapist appointments error:", error);
+      return res.status(500).json({ error: "Failed to fetch appointments" });
     }
   }
 );
