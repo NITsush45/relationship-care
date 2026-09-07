@@ -663,16 +663,6 @@ async function getAppointmentsForTherapist(specialization) {
 }
 
 async function addNewsletterSubscriber(email) {
-}
-  if (!pool) return readJson(NEWSLETTER_FILE);
-  const result = await safeDbQuery(
-    "SELECT id, email, created_at FROM newsletter_subscribers ORDER BY created_at DESC"
-  );
-  if (!result) return readJson(NEWSLETTER_FILE);
-  return result.rows.map((r) => ({ id: r.id, email: r.email, createdAt: r.created_at }));
-}
-
-async function addNewsletterSubscriber(email) {
   const normalized = String(email || "").trim();
   if (!pool) {
     const list = await getNewsletterSubscribers();
