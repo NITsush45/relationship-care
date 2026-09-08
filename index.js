@@ -884,7 +884,13 @@ app.post(
         password,
         firstName,
         lastName,
+        role,
       } = req.body || {};
+
+      const normalizedRole =
+        String(role || "").trim().toLowerCase() === "therapist"
+          ? "therapist"
+          : "user";
 
       // -----------------------------
       // VALIDATION
@@ -985,7 +991,7 @@ app.post(
             $3,
             $4,
             $5,
-            'user',
+            $6,
             'local'
           )
           RETURNING *
@@ -996,6 +1002,7 @@ app.post(
             passwordHash,
             normalizedFirstName,
             normalizedLastName,
+            normalizedRole,
           ]
         );
 
@@ -1229,7 +1236,7 @@ app.get(
       const profile = await getTherapistProfile(req.user.id);
       const specialization = profile?.specialization || "";
       const appointments = await getAppointmentsForTherapist(specialization);
-      return res.json(appointments);
+      return res.json({ appointments, specialization, service: specialization });
     } catch (error) {
       console.error("Get therapist appointments error:", error);
       return res.status(500).json({ error: "Failed to fetch appointments" });
@@ -1887,7 +1894,7 @@ app.get(
       const appointments = await getAppointmentsForTherapist(
         profile?.specialization
       );
-      return res.json(appointments);
+      return res.json({ appointments, specialization, service: specialization });
     } catch (error) {
       console.error("get therapist appointments error:", error);
       return res.status(500).json({ error: "Failed to fetch appointments" });

@@ -654,13 +654,7 @@ async function saveTherapistProfile({ userId, specialization, age, mood }) {
   return profile;
 }
 
-async function getAppointmentsForTherapist(specialization) {
-  const allAppointments = await getAppointments();
-  if (!specialization) return allAppointments;
-  return allAppointments.filter(
-    (a) => (a.service || "").toLowerCase() === specialization.toLowerCase()
-  );
-}
+/* removed duplicate exact-match getAppointmentsForTherapist - canonical fuzzy version kept below */
 
 async function getNewsletterSubscribers() {
   if (!pool) return readJson(NEWSLETTER_FILE);
