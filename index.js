@@ -80,6 +80,67 @@ const GOOGLE_REDIRECT_URI =
 
 
 /* =========================================================
+   CLIENT URL ALLOWLIST
+
+   Google OAuth always redirects to OUR backend first, and the
+   backend then forwards the result to the frontend site that
+   started the flow. That target site must come from a signed
+   allowlist – never from arbitrary user input – so the JWT can
+   only ever be delivered to first-party frontends (production,
+   localhost, or hosts listed in CLIENT_URLS).
+========================================================= */
+
+const CLIENT_URLS = [
+  "http://localhost:3000",
+
+  "http://127.0.0.1:3000",
+
+  ...(
+    process.env.FRONTEND_URL
+      ? process.env.FRONTEND_URL
+          .split(",")
+          .map((s) =>
+            s.trim().replace(/\/+$/, "")
+          )
+          .filter(Boolean)
+      : []
+  ),
+
+  ...(
+    process.env.CLIENT_URLS
+      ? process.env.CLIENT_URLS
+          .split(",")
+          .map((s) =>
+            s.trim().replace(/\/+$/, "")
+          )
+          .filter(Boolean)
+      : []
+  ),
+];
+
+const ALLOWED_CLIENT_URLS = [
+  ...new Set(CLIENT_URLS),
+];
+
+function resolveClientUrl(candidate) {
+  if (!candidate) {
+    return null;
+  }
+
+  const normalized =
+    String(candidate)
+      .trim()
+      .replace(/\/+$/, "");
+
+  return ALLOWED_CLIENT_URLS.includes(
+    normalized
+  )
+    ? normalized
+    : null;
+}
+
+
+/* =========================================================
    DATABASE
 ========================================================= */
 
@@ -134,11 +195,11 @@ if (
   GOOGLE_CLIENT_SECRET &&
   GOOGLE_REDIRECT_URI
 ) {
-  googleOAuth2Client = new google.auth.OAuth2(
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    GOOGLE_REDIRECT_URI
-  );
+  googleOAuth2Client = new google.auth.OAuth2({
+    clientId: GOOGLE_CLIENT_ID,
+    clientSecret: GOOGLE_CLIENT_SECRET,
+    redirectUri: GOOGLE_REDIRECT_URI,
+  });
 } else {
   console.warn(
     "WARNING: Google OAuth environment variables are not fully configured."
@@ -172,10 +233,13 @@ function safeTimingSafeEqual(valueA, valueB) {
   return crypto.timingSafeEqual(bufferA, bufferB);
 }
 
-function createOAuthState(role) {
+function createOAuthState(role, clientUrl) {
   const payload = Buffer.from(
     JSON.stringify({
       role: role === "therapist" ? "therapist" : "user",
+
+      // Signed, allowlisted frontend that started the flow.
+      client: clientUrl || null,
 
       nonce: crypto.randomBytes(16).toString("hex"),
 
@@ -230,6 +294,12 @@ function verifyOAuthState(state) {
 
     return {
       role: parsed.role === "therapist" ? "therapist" : "user",
+
+      // Only allowlisted sites ever get stored here at creation time.
+      client:
+        typeof parsed.client === "string"
+          ? resolveClientUrl(parsed.client)
+          : null,
     };
   } catch (error) {
     return null;
@@ -277,6 +347,14 @@ async function initAuthDatabase() {
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_users_google_id
       ON users(google_id);
+    `);
+
+    // Tracks whether a user finished the signup-only onboarding
+    // questionnaire. Returning users must never see it again.
+    await db.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS questionnaire_completed
+      BOOLEAN NOT NULL DEFAULT FALSE;
     `);
 
     await db.query(`
@@ -619,6 +697,46 @@ function generateLiveChatReply(
     );
   }
 
+  if (
+    /(therapist|counselor|counsellor|doctor|expert|specialist)\b/.test(
+      text
+    )
+  ) {
+    replies.push(
+      "Our licensed therapists specialize in relationship, breakup, and marriage support. You can browse them on the Services page and book the one who fits you best."
+    );
+  }
+
+  if (
+    /(human|real person|agent|support team|someone)\b/.test(
+      text
+    )
+  ) {
+    replies.push(
+      "Of course. Send us a message through the contact form on this page and our team will reply by email, or call us during working hours (Mon-Sat, 8AM-11PM)."
+    );
+  }
+
+  if (
+    /(thank|thanks|great|awesome|helpful)\b/.test(
+      text
+    )
+  ) {
+    replies.push(
+      "You're very welcome. If anything else comes up, I'm right here."
+    );
+  }
+
+  if (
+    /(confess|confession|private|anonymous)\b/.test(
+      text
+    )
+  ) {
+    replies.push(
+      "For private conversations, the Confess page lets you create a room code and chat one-on-one in real time."
+    );
+  }
+
   if (replies.length === 0) {
     replies.push(
       "Thanks for reaching out. Tell me your main concern, preferred session type, and preferred date/time."
@@ -798,6 +916,10 @@ function sanitizeUser(user) {
     provider:
       user.provider ||
       "local",
+
+    // Signup-only questionnaire flag (server source of truth).
+    hasCompletedQuestionnaire:
+      user.questionnaire_completed === true,
   };
 }
 
@@ -1263,6 +1385,14 @@ app.get(
           ? "therapist"
           : "user";
 
+      // Remember (in signed state) which frontend started the
+      // flow so the callback sends the result back there. Local
+      // development therefore works instead of bouncing the user
+      // to the production site.
+      const clientUrl = resolveClientUrl(
+        req.query.client
+      );
+
       const url =
         googleOAuth2Client.generateAuthUrl(
           {
@@ -1277,7 +1407,7 @@ app.get(
             prompt:
               "select_account",
 
-            state: createOAuthState(role),
+            state: createOAuthState(role, clientUrl),
           }
         );
 
@@ -1309,7 +1439,7 @@ app.get(
       // (e.g. the user cancelled the consent screen).
       if (req.query.error) {
         return res.redirect(
-          `${FRONTEND_URL}/auth/callback?error=google_access_denied`
+          `${clientBase}/auth/callback?error=google_access_denied`
         );
       }
 
@@ -1318,13 +1448,13 @@ app.get(
 
       if (!code) {
         return res.redirect(
-          `${FRONTEND_URL}/auth/callback?error=google_code_missing`
+          `${clientBase}/auth/callback?error=google_code_missing`
         );
       }
 
       if (!googleOAuth2Client) {
         return res.redirect(
-          `${FRONTEND_URL}/auth/callback?error=google_not_configured`
+          `${clientBase}/auth/callback?error=google_not_configured`
         );
       }
 
@@ -1335,7 +1465,7 @@ app.get(
 
       if (!verifiedState) {
         return res.redirect(
-          `${FRONTEND_URL}/auth/callback?error=google_invalid_state`
+          `${clientBase}/auth/callback?error=google_invalid_state`
         );
       }
 
@@ -1348,6 +1478,12 @@ app.get(
 
       const oauthState =
         verifiedState.role;
+
+      // Where to send the browser afterwards: the allowlisted
+      // site that started this flow, or the default frontend.
+      const clientBase =
+        verifiedState.client ||
+        FRONTEND_URL;
 
       googleOAuth2Client.setCredentials(
         tokens
@@ -1368,7 +1504,7 @@ app.get(
 
       if (!data.email) {
         return res.redirect(
-          `${FRONTEND_URL}/auth/callback?error=google_email_missing`
+          `${clientBase}/auth/callback?error=google_email_missing`
         );
       }
 
@@ -1563,7 +1699,7 @@ app.get(
         createToken(user);
 
       const redirectUrl =
-        `${FRONTEND_URL}/auth/callback?token=${encodeURIComponent(
+        `${clientBase}/auth/callback?token=${encodeURIComponent(
           token
         )}`;
 
@@ -1577,7 +1713,7 @@ app.get(
       );
 
       return res.redirect(
-        `${FRONTEND_URL}/auth/callback?error=google_auth_failed`
+        `${clientBase}/auth/callback?error=google_auth_failed`
       );
     }
   }
@@ -1701,6 +1837,55 @@ app.post(
     }
   }
 );
+
+
+/* =========================================================
+   QUESTIONNAIRE COMPLETION (signup onboarding)
+
+   Marks the signed-in user as having finished the signup
+   questionnaire so it never appears again on later logins.
+========================================================= */
+
+app.post(
+  "/api/user/questionnaire-complete",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      await db.query(
+        `
+        UPDATE users
+        SET
+          questionnaire_completed = TRUE,
+
+          updated_at =
+            CURRENT_TIMESTAMP
+
+        WHERE id = $1
+        `,
+        [req.user.id]
+      );
+
+      return res.json({
+        success: true,
+
+        hasCompletedQuestionnaire: true,
+      });
+    } catch (error) {
+      console.error(
+        "Questionnaire completion error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+
+        error:
+          "Failed to save questionnaire completion",
+      });
+    }
+  }
+);
+
 
 
 /* =========================================================
@@ -3365,6 +3550,54 @@ app.get(
 
 
 /* =========================================================
+   LIVE CHAT (contact page assistant)
+========================================================= */
+
+app.post(
+  "/api/live-chat/reply",
+  (req, res) => {
+    try {
+      const message =
+        String(
+          (req.body || {}).message || ""
+        )
+          .trim()
+          .slice(0, 1000);
+
+      if (!message) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Message is required",
+        });
+      }
+
+      const reply =
+        generateLiveChatReply(
+          message
+        );
+
+      return res.json({
+        success: true,
+        reply,
+      });
+    } catch (error) {
+      console.error(
+        "Live chat reply error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error:
+          "Unable to generate a reply right now",
+      });
+    }
+  }
+);
+
+
+/* =========================================================
    SOCKET.IO
 ========================================================= */
 
@@ -3458,7 +3691,10 @@ io.on(
           ).trim() ||
           "guest";
 
-        // Only announce the join to others the first time.
+        // First time joining this room on this socket:
+        // announce to others AND confirm to the user themself.
+        // (Repeats of join-room – e.g. the client double-emitting
+        // around a reconnect – must not spam duplicate messages.)
         if (
           !socket.rooms.has(safeRoom)
         ) {
@@ -3478,19 +3714,19 @@ io.on(
                   new Date().toISOString(),
               }
             );
+
+          // Confirm the join back to the user themself.
+          socket.emit(
+            "chat:system",
+            {
+              message:
+                `You joined the room "${safeRoom}"`,
+
+              at:
+                new Date().toISOString(),
+            }
+          );
         }
-
-        // Confirm the join back to the user themself.
-        socket.emit(
-          "chat:system",
-          {
-            message:
-              `You joined the room "${safeRoom}"`,
-
-            at:
-              new Date().toISOString(),
-          }
-        );
       }
     );
 
