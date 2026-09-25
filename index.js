@@ -65,18 +65,51 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const FRONTEND_URL =
   process.env.FRONTEND_URL || "http://localhost:3000";
 
-const GOOGLE_CLIENT_ID =
-  process.env.GOOGLE_CLIENT_ID;
+/* Dashboard env values are trimmed because hosting providers
+   (Render, Railway, Vercel) commonly store a trailing space or
+   newline when a value is pasted into their UI. Google compares
+   redirect URIs byte-for-byte, so one stray character produces
+   "Error 400: redirect_uri_mismatch" even though the value looks
+   correct in the dashboard. */
+const trimEnv = (value) => {
+  const trimmed =
+    typeof value === "string" ? value.trim() : value;
 
-const GOOGLE_CLIENT_SECRET =
-  process.env.GOOGLE_CLIENT_SECRET;
+  return trimmed || undefined;
+};
 
-const GOOGLE_REDIRECT_URI =
+const GOOGLE_CLIENT_ID = trimEnv(
+  process.env.GOOGLE_CLIENT_ID
+);
+
+const GOOGLE_CLIENT_SECRET = trimEnv(
+  process.env.GOOGLE_CLIENT_SECRET
+);
+
+const RENDER_EXTERNAL_HOSTNAME = trimEnv(
+  process.env.RENDER_EXTERNAL_HOSTNAME
+);
+
+/* Records WHICH env var decided the callback URL, so a
+   redirect_uri_mismatch can be traced in seconds. Unless
+   GOOGLE_REDIRECT_URI is set explicitly, a leftover
+   GOOGLE_CALLBACK_URL outranks RENDER_EXTERNAL_HOSTNAME. */
+const GOOGLE_REDIRECT_URI_SOURCE =
+  trimEnv(process.env.GOOGLE_REDIRECT_URI)
+    ? "GOOGLE_REDIRECT_URI"
+    : trimEnv(process.env.GOOGLE_CALLBACK_URL)
+    ? "GOOGLE_CALLBACK_URL (legacy)"
+    : RENDER_EXTERNAL_HOSTNAME
+    ? "RENDER_EXTERNAL_HOSTNAME"
+    : `localhost fallback (port ${PORT})`;
+
+const GOOGLE_REDIRECT_URI = trimEnv(
   process.env.GOOGLE_REDIRECT_URI ||
-  process.env.GOOGLE_CALLBACK_URL || // backward compatibility
-  (process.env.RENDER_EXTERNAL_HOSTNAME
-    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/api/auth/google/callback`
-    : `http://localhost:${PORT}/api/auth/google/callback`);
+    process.env.GOOGLE_CALLBACK_URL || // backward compatibility
+    (RENDER_EXTERNAL_HOSTNAME
+      ? `https://${RENDER_EXTERNAL_HOSTNAME}/api/auth/google/callback`
+      : `http://localhost:${PORT}/api/auth/google/callback`)
+);
 
 
 /* =========================================================
@@ -355,6 +388,11 @@ async function initAuthDatabase() {
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS questionnaire_completed
       BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+
+    await db.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS questionnaire_answers JSONB;
     `);
 
     await db.query(`
@@ -1428,6 +1466,34 @@ app.get(
 
 
 /* =========================================================
+   AUTH – GOOGLE CONFIG (DIAGNOSTICS)
+
+   Read-only and non-secret: the client id and redirect URI
+   below already travel through the browser on every Google
+   sign-in attempt. Open this against the deployed backend to
+   see the exact redirect URI that must be registered, character
+   for character, under "Authorized redirect URIs" in the Google
+   Cloud Console for that same client id.
+========================================================= */
+
+app.get(
+  "/api/auth/google/config",
+  (req, res) =>
+    res.json({
+      configured: Boolean(googleOAuth2Client),
+
+      clientId: GOOGLE_CLIENT_ID || null,
+
+      redirectUri: GOOGLE_REDIRECT_URI,
+
+      redirectUriSource: GOOGLE_REDIRECT_URI_SOURCE,
+
+      allowedClientUrls: ALLOWED_CLIENT_URLS,
+    })
+);
+
+
+/* =========================================================
    AUTH – GOOGLE CALLBACK
 ========================================================= */
 
@@ -1740,7 +1806,8 @@ app.get(
             last_name,
             image_url,
             role,
-            provider
+            provider,
+            questionnaire_completed
           FROM users
           WHERE id = $1
           LIMIT 1
@@ -1851,18 +1918,42 @@ app.post(
   authenticateToken,
   async (req, res) => {
     try {
+      const answers = req.body?.answers;
+
+      if (
+        answers !== undefined &&
+        (
+          answers === null ||
+          typeof answers !== "object" ||
+          Array.isArray(answers)
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          error: "Questionnaire answers must be an object",
+        });
+      }
+
+      const serializedAnswers =
+        answers === undefined
+          ? null
+          : JSON.stringify(answers);
+
       await db.query(
         `
         UPDATE users
         SET
           questionnaire_completed = TRUE,
 
+          questionnaire_answers =
+            COALESCE($2::jsonb, questionnaire_answers),
+
           updated_at =
             CURRENT_TIMESTAMP
 
         WHERE id = $1
         `,
-        [req.user.id]
+        [req.user.id, serializedAnswers]
       );
 
       return res.json({
@@ -4021,7 +4112,53 @@ server.listen(
     );
 
     console.log(
-      `Google OAuth callback: ${GOOGLE_REDIRECT_URI}`
+      `Google OAuth callback: ${GOOGLE_REDIRECT_URI} (from ${GOOGLE_REDIRECT_URI_SOURCE})`
     );
+
+    if (GOOGLE_CLIENT_ID) {
+      console.log(
+        `Google OAuth client id: ${GOOGLE_CLIENT_ID}`
+      );
+    }
+
+    /* "Error 400: redirect_uri_mismatch" means the URI logged
+       above is not listed byte-for-byte in the Google Cloud
+       Console (APIs & Services -> Credentials -> OAuth 2.0
+       Client IDs -> Authorized redirect URIs) for this client
+       id. Warn about the ways that happens silently. */
+    const isLocalRedirect =
+      GOOGLE_REDIRECT_URI.startsWith(
+        "http://localhost"
+      ) ||
+      GOOGLE_REDIRECT_URI.startsWith(
+        "http://127.0.0.1"
+      );
+
+    if (
+      isLocalRedirect &&
+      (RENDER_EXTERNAL_HOSTNAME ||
+        process.env.NODE_ENV === "production")
+    ) {
+      console.warn(
+        "WARNING: Google OAuth redirect URI resolves to localhost on a hosted environment. Set GOOGLE_REDIRECT_URI to the public backend URL, otherwise Google answers redirect_uri_mismatch."
+      );
+    }
+
+    if (GOOGLE_REDIRECT_URI.endsWith("/")) {
+      console.warn(
+        "WARNING: Google OAuth redirect URI ends with a trailing slash. Remove it - or register the exact same string - otherwise Google answers redirect_uri_mismatch."
+      );
+    }
+
+    if (
+      !isLocalRedirect &&
+      !GOOGLE_REDIRECT_URI.includes(
+        "/api/auth/google/callback"
+      )
+    ) {
+      console.warn(
+        "WARNING: Google OAuth redirect URI does not point at /api/auth/google/callback. Google answers redirect_uri_mismatch and this callback route never runs."
+      );
+    }
   }
 );
