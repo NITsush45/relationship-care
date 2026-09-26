@@ -293,22 +293,14 @@ async function getAppointmentById(id) {
 }async function getAppointments() {
   if (!pool) return readJson(APPOINTMENTS_FILE);
   const result = await safeDbQuery(
-    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, duration_hours, total_fee, receipt_number, payment_provider, payment_order_id, payment_id, payment_status, created_at FROM appointments ORDER BY created_at DESC"
+    "SELECT id, name, email, phone, service, gender, message, date, time, doctor_id, consultation_type, consultation_fee, duration_hours, total_fee, receipt_number, payment_provider, payment_order_id, payment_id, payment_status, user_id, session_id, created_at FROM appointments ORDER BY created_at DESC"
   );
   if (!result) return readJson(APPOINTMENTS_FILE);
-  return result.rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    email: r.email,
-    phone: r.phone || "",
-    service: r.service,
-    gender: r.gender || "",
-    message: r.message || "",
-    date: r.date || null,
-    time: r.time || null,
-    doctorId: r.doctor_id || null,
-    createdAt: r.created_at,
-  }));
+
+  // Reuse the shared mapper so the payment fields (`paymentStatus`,
+  // `consultationFee`, `totalFee`, ...) survive. They used to be selected
+  // but never returned, which silently made any revenue report read as zero.
+  return result.rows.map((r) => mapAppointmentRow(r));
 }
 
 async function getAppointmentsForUser(userId) {

@@ -111,6 +111,36 @@ const GOOGLE_REDIRECT_URI = trimEnv(
       : `http://localhost:${PORT}/api/auth/google/callback`)
 );
 
+/*
+ * The only email addresses allowed to hold the admin role (comma separated).
+ *
+ * Admin accounts are NOT created through /api/auth/signup - that endpoint can
+ * only ever produce "user" or "therapist". They are granted out of band with
+ * `server/scripts/promoteAdmin.js`, and this list is the second lock: an
+ * account whose email is absent from here is refused by `requireAdmin` on
+ * every admin request, so removing an address revokes access immediately
+ * without touching the database row.
+ *
+ * Matching is case-insensitive and ignores surrounding whitespace. When the
+ * variable is unset the list is empty, which means NOBODY can use the admin
+ * area (fail closed) rather than everybody.
+ */
+const ADMIN_EMAILS = new Set(
+  String(process.env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+/** True when `email` is on the admin allowlist. */
+function isAllowedAdminEmail(email) {
+  if (ADMIN_EMAILS.size === 0) return false;
+
+  return ADMIN_EMAILS.has(
+    String(email || "").trim().toLowerCase()
+  );
+}
+
 
 /* =========================================================
    CLIENT URL ALLOWLIST
@@ -408,6 +438,41 @@ async function initAuthDatabase() {
 
     await db.query(`
       ALTER TABLE therapist_profiles ADD COLUMN IF NOT EXISTS mood TEXT;
+    `);
+
+    /*
+     * Admin approval workflow. A therapist account is created immediately
+     * (it must be able to sign in to finish onboarding), but it stays
+     * `pending` until an admin approves it.
+     *
+     * Existing rows are backfilled to `approved` so deploying this does not
+     * lock out therapists who are already working on the platform.
+     */
+    await db.query(`
+      ALTER TABLE therapist_profiles
+      ADD COLUMN IF NOT EXISTS approval_status
+      VARCHAR(20) NOT NULL DEFAULT 'pending';
+    `);
+
+    await db.query(`
+      ALTER TABLE therapist_profiles
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
+    `);
+
+    await db.query(`
+      ALTER TABLE therapist_profiles
+      ADD COLUMN IF NOT EXISTS approved_by UUID;
+    `);
+
+    await db.query(`
+      UPDATE therapist_profiles
+      SET approval_status = 'approved'
+      WHERE approval_status IS NULL;
+    `);
+
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_therapist_profiles_approval
+      ON therapist_profiles(approval_status);
     `);
 
     console.log("Authentication database initialized");
@@ -1034,6 +1099,61 @@ function authenticateToken(
    AUTH – SIGNUP
 ========================================================= */
 
+/* =========================================================
+   ADMIN – ROLE RESOLUTION + GUARD
+   ========================================================= */
+
+/*
+ * `admin` is a third role alongside `user` and `therapist`.
+ *
+ * Role names are normalised everywhere they are accepted so a request can
+ * never smuggle in an unexpected value.
+ */
+const VALID_ROLES = ["user", "therapist", "admin"];
+
+function normalizeRole(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  return VALID_ROLES.includes(normalized)
+    ? normalized
+    : "user";
+}
+
+/**
+ * Guards every /api/admin/* route.
+ *
+ * Runs after `authenticateToken`, so `req.user` is the decoded JWT. The
+ * admin role is baked into the token at sign-in / signup, which means a
+ * role change only takes effect on the next login - the safe direction for
+ * an account that has just been promoted.
+ */
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).json({
+      success: false,
+      error: "Admin access required",
+    });
+  }
+
+  /*
+   * The allowlist is the only lock, so it is re-checked on every admin
+   * request. That means removing an address from ADMIN_EMAILS revokes access
+   * on the account's very next call, without touching the user's row - useful
+   * for offboarding someone whose address is no longer trusted.
+   */
+  if (!isAllowedAdminEmail(req.user.email)) {
+    return res.status(403).json({
+      success: false,
+      error:
+        "This account is not permitted to use the admin dashboard",
+    });
+  }
+
+  return next();
+}
+
 app.post(
   "/api/auth/signup",
   async (req, res) => {
@@ -1047,8 +1167,20 @@ app.post(
         role,
       } = req.body || {};
 
+      /*
+       * The role is decided entirely by the server, and only two values are
+       * reachable from here: "user" and "therapist".
+       *
+       * There is deliberately NO way to become an admin through this endpoint
+       * - not with a code, not with anything else. Admin accounts are granted
+       * out of band with `server/scripts/promoteAdmin.js`, which additionally
+       * refuses any address that is not on the ADMIN_EMAILS allowlist. That
+       * keeps the privilege escalation surface off the public signup form.
+       */
       const normalizedRole =
-        String(role || "").trim().toLowerCase() === "therapist"
+        String(role || "")
+          .trim()
+          .toLowerCase() === "therapist"
           ? "therapist"
           : "user";
 
@@ -3953,6 +4085,728 @@ io.on(
 /* =========================================================
    HEALTH
 ========================================================= */
+
+/* =========================================================
+   ADMIN – DASHBOARD API
+   ========================================================= */
+
+/*
+ * Exact option strings used by the questionnaire's medication / therapy
+ * questions. They are matched on exactly (not fuzzily) so "No medication"
+ * never counts as someone taking medication.
+ */
+const MEDICATION_NONE = "No medication";
+const THERAPY_NONE = "Not in therapy";
+const THERAPY_CURRENT = "Currently in therapy";
+
+/**
+ * Pulls the medication / therapy answers out of a questionnaire blob.
+ *
+ * `questionnaire_answers` is JSONB, but node-postgres hands it back either
+ * as an object or as a string depending on how it was written, so both are
+ * accepted. Anything unexpected yields an empty summary rather than throwing,
+ * so one bad row cannot blank the whole dashboard.
+ */
+function summarizeCarePlan(rawAnswers) {
+  let answers = rawAnswers;
+
+  if (typeof answers === "string") {
+    try {
+      answers = JSON.parse(answers);
+    } catch (_) {
+      answers = null;
+    }
+  }
+
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) {
+    return {
+      medicationStatus: null,
+      medicationDetails: "",
+      therapyStatus: null,
+      therapyDetails: "",
+      onMedication: false,
+      inTherapy: false,
+      answeredCount: 0,
+    };
+  }
+
+  const medicationStatus = answers.medicationStatus || null;
+  const therapyStatus = answers.therapyStatus || null;
+
+  return {
+    medicationStatus,
+    medicationDetails: answers.medicationDetails || "",
+    therapyStatus,
+    therapyDetails: answers.therapyDetails || "",
+    onMedication:
+      Boolean(medicationStatus) &&
+      medicationStatus !== MEDICATION_NONE,
+    inTherapy: therapyStatus === THERAPY_CURRENT,
+    answeredCount: Object.keys(answers).filter(
+      (key) => key !== "completedAt"
+    ).length,
+  };
+}
+
+/** The amount actually charged for a paid appointment. */
+function appointmentAmount(appointment) {
+  return (
+    Number(
+      appointment.totalFee ??
+        appointment.consultationFee ??
+        0
+    ) || 0
+  );
+}
+
+/**
+ * Aggregates revenue out of the appointment list.
+ *
+ * Only `paid` appointments count - `pending` rows are checkout attempts that
+ * were abandoned and would otherwise inflate the number.
+ */
+function buildEarningsReport(appointments) {
+  const all = appointments || [];
+
+  const paid = all.filter(
+    (appointment) =>
+      String(appointment.paymentStatus || "")
+        .trim()
+        .toLowerCase() === "paid"
+  );
+
+  const totalRevenue = paid.reduce(
+    (sum, appointment) => sum + appointmentAmount(appointment),
+    0
+  );
+
+  const now = new Date();
+  const monthStart = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    1
+  );
+
+  const createdAtOf = (appointment) => {
+    if (!appointment.createdAt) return null;
+    const created = new Date(appointment.createdAt);
+    return Number.isNaN(created.getTime()) ? null : created;
+  };
+
+  const thisMonthRevenue = paid
+    .filter((appointment) => {
+      const created = createdAtOf(appointment);
+      return created && created >= monthStart;
+    })
+    .reduce(
+      (sum, appointment) => sum + appointmentAmount(appointment),
+      0
+    );
+
+  // Revenue grouped by consultation type (chat / call / video).
+  const byTypeMap = new Map();
+
+  for (const appointment of paid) {
+    const type = appointment.consultationType || "unspecified";
+
+    const entry = byTypeMap.get(type) || {
+      type,
+      label:
+        CONSULTATION_LABELS[type] ||
+        appointment.service ||
+        type,
+      count: 0,
+      revenue: 0,
+    };
+
+    entry.count += 1;
+    entry.revenue += appointmentAmount(appointment);
+    byTypeMap.set(type, entry);
+  }
+
+  /*
+   * Last six calendar months, oldest first. The dashboard draws this as a
+   * bar chart, which needs a dense series rather than only the months that
+   * happened to earn something.
+   */
+  const byMonth = [];
+
+  for (let offset = 5; offset >= 0; offset -= 1) {
+    const cursor = new Date(
+      now.getFullYear(),
+      now.getMonth() - offset,
+      1
+    );
+
+    const revenue = paid
+      .filter((appointment) => {
+        const created = createdAtOf(appointment);
+        if (!created) return false;
+
+        return (
+          created.getFullYear() === cursor.getFullYear() &&
+          created.getMonth() === cursor.getMonth()
+        );
+      })
+      .reduce(
+        (sum, appointment) => sum + appointmentAmount(appointment),
+        0
+      );
+
+    byMonth.push({
+      key: `${cursor.getFullYear()}-${cursor.getMonth()}`,
+      label: cursor.toLocaleString("en-US", {
+        month: "short",
+        year: "numeric",
+      }),
+      revenue,
+    });
+  }
+
+  const recent = [...paid]
+    .sort((a, b) => {
+      const left = createdAtOf(a);
+      const right = createdAtOf(b);
+      return (right ? right.getTime() : 0) -
+        (left ? left.getTime() : 0);
+    })
+    .slice(0, 10)
+    .map((appointment) => ({
+      id: appointment.id,
+      name: appointment.name,
+      email: appointment.email,
+      service: appointment.service,
+      consultationType: appointment.consultationType,
+      label:
+        CONSULTATION_LABELS[appointment.consultationType] ||
+        appointment.service ||
+        "Session",
+      amount: appointmentAmount(appointment),
+      provider: appointment.paymentProvider,
+      createdAt: appointment.createdAt,
+    }));
+
+  return {
+    totalRevenue,
+    thisMonthRevenue,
+    paidCount: paid.length,
+    pendingCount: all.length - paid.length,
+    byType: [...byTypeMap.values()].sort(
+      (a, b) => b.revenue - a.revenue
+    ),
+    byMonth,
+    recent,
+  };
+}
+
+/* ---------------------------------------------------------
+   GET /api/admin/overview – headline counters + earnings
+   --------------------------------------------------------- */
+app.get(
+  "/api/admin/overview",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const [userCounts, therapistCounts, appointments] =
+        await Promise.all([
+          db.query(`
+            SELECT
+              COUNT(*) FILTER (WHERE role = 'user')::int AS users,
+              COUNT(*) FILTER (WHERE role = 'therapist')::int AS therapists,
+              COUNT(*) FILTER (WHERE role = 'admin')::int AS admins,
+              COUNT(*) FILTER (WHERE questionnaire_completed = TRUE)::int AS questionnaires_completed
+            FROM users
+          `),
+
+          db.query(`
+            SELECT
+              COUNT(*) FILTER (WHERE COALESCE(p.approval_status, 'pending') = 'pending')::int AS pending,
+              COUNT(*) FILTER (WHERE p.approval_status = 'approved')::int AS approved,
+              COUNT(*) FILTER (WHERE p.approval_status = 'rejected')::int AS rejected
+            FROM users u
+            LEFT JOIN therapist_profiles p
+              ON p.user_id::text = u.id::text
+            WHERE u.role = 'therapist'
+          `),
+
+          getAppointments(),
+        ]);
+
+      const earnings = buildEarningsReport(appointments);
+
+      /*
+       * Aggregate the medication / therapy picture across every answered
+       * questionnaire so the dashboard can show the totals at a glance.
+       */
+      const careRows = await db.query(`
+        SELECT questionnaire_answers
+        FROM users
+        WHERE role = 'user'
+          AND questionnaire_completed = TRUE
+          AND questionnaire_answers IS NOT NULL
+      `);
+
+      const carePlans = careRows.rows.map((row) =>
+        summarizeCarePlan(row.questionnaire_answers)
+      );
+
+      return res.json({
+        success: true,
+
+        totals: {
+          users: userCounts.rows[0].users,
+          therapists: userCounts.rows[0].therapists,
+          admins: userCounts.rows[0].admins,
+          questionnairesCompleted:
+            userCounts.rows[0].questionnaires_completed,
+          pendingTherapists: therapistCounts.rows[0].pending,
+          approvedTherapists: therapistCounts.rows[0].approved,
+          rejectedTherapists: therapistCounts.rows[0].rejected,
+        },
+
+        earnings,
+
+        care: {
+          usersWithPlan: carePlans.length,
+          onMedication: carePlans.filter(
+            (plan) => plan.onMedication
+          ).length,
+          inTherapy: carePlans.filter(
+            (plan) => plan.inTherapy
+          ).length,
+        },
+      });
+    } catch (error) {
+      console.error("Admin overview error:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to load the overview",
+      });
+    }
+  }
+);
+/* ---------------------------------------------------------
+   GET /api/admin/users – every account + care-plan summary
+   Supports ?search= &role= &limit= &offset=
+   --------------------------------------------------------- */
+app.get(
+  "/api/admin/users",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const search = String(req.query.search || "").trim();
+      const role = String(req.query.role || "").trim();
+
+      const limit = Math.min(
+        Math.max(Number(req.query.limit) || 100, 1),
+        500
+      );
+      const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+      const result = await db.query(
+        `
+          SELECT
+            id, username, email, first_name, last_name, role, provider,
+            questionnaire_completed, questionnaire_answers, created_at
+          FROM users
+          WHERE ($1 = '' OR role = $1)
+            AND (
+              $2 = ''
+              OR LOWER(COALESCE(username, '')) LIKE LOWER('%' || $2 || '%')
+              OR LOWER(email) LIKE LOWER('%' || $2 || '%')
+              OR LOWER(COALESCE(first_name, '')) LIKE LOWER('%' || $2 || '%')
+              OR LOWER(COALESCE(last_name, '')) LIKE LOWER('%' || $2 || '%')
+            )
+          ORDER BY created_at DESC
+          LIMIT $3 OFFSET $4
+        `,
+        [role, search, limit, offset]
+      );
+
+      const users = result.rows.map((row) => {
+        const care = summarizeCarePlan(row.questionnaire_answers);
+
+        return {
+          id: row.id,
+          username: row.username,
+          email: row.email,
+          name:
+            [row.first_name, row.last_name]
+              .filter(Boolean)
+              .join(" ") ||
+            row.username ||
+            row.email,
+          firstName: row.first_name,
+          lastName: row.last_name,
+          role: row.role,
+          provider: row.provider,
+          questionnaireCompleted:
+            row.questionnaire_completed === true,
+          createdAt: row.created_at,
+
+          // Medication / therapy, straight from the questionnaire.
+          medicationStatus: care.medicationStatus,
+          medicationDetails: care.medicationDetails,
+          therapyStatus: care.therapyStatus,
+          therapyDetails: care.therapyDetails,
+          onMedication: care.onMedication,
+          inTherapy: care.inTherapy,
+          answeredCount: care.answeredCount,
+        };
+      });
+
+      return res.json({
+        success: true,
+        users,
+        count: users.length,
+      });
+    } catch (error) {
+      console.error("Admin users error:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to load users",
+      });
+    }
+  }
+);
+
+
+/* ---------------------------------------------------------
+   GET /api/admin/users/:id – one account + full questionnaire
+   --------------------------------------------------------- */
+app.get(
+  "/api/admin/users/:id",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const result = await db.query(
+        `
+          SELECT
+            id, username, email, first_name, last_name, role, provider,
+            image_url, questionnaire_completed, questionnaire_answers,
+            created_at, updated_at
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [req.params.id]
+      );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          success: false,
+          error: "User not found",
+        });
+      }
+
+      const row = result.rows[0];
+
+      let questionnaire = row.questionnaire_answers;
+
+      if (typeof questionnaire === "string") {
+        try {
+          questionnaire = JSON.parse(questionnaire);
+        } catch (_) {
+          questionnaire = null;
+        }
+      }
+
+      const care = summarizeCarePlan(row.questionnaire_answers);
+
+      const appointments = await getAppointmentsForUser(
+        req.params.id
+      );
+
+      return res.json({
+        success: true,
+
+        user: {
+          id: row.id,
+          username: row.username,
+          email: row.email,
+          name:
+            [row.first_name, row.last_name]
+              .filter(Boolean)
+              .join(" ") ||
+            row.username ||
+            row.email,
+          firstName: row.first_name,
+          lastName: row.last_name,
+          imageUrl: row.image_url,
+          role: row.role,
+          provider: row.provider,
+          questionnaireCompleted:
+            row.questionnaire_completed === true,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+
+          care,
+          questionnaire:
+            questionnaire &&
+            typeof questionnaire === "object"
+              ? questionnaire
+              : null,
+
+          appointments: appointments.map((appointment) => ({
+            id: appointment.id,
+            service: appointment.service,
+            date: appointment.date,
+            time: appointment.time,
+            consultationType: appointment.consultationType,
+            amount: appointmentAmount(appointment),
+            paymentStatus: appointment.paymentStatus,
+            createdAt: appointment.createdAt,
+          })),
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Admin user detail error:",
+        error
+      );
+      return res.status(500).json({
+        success: false,
+        error: "Failed to load the user",
+      });
+    }
+  }
+);
+
+
+
+
+/* ---------------------------------------------------------
+   GET /api/admin/therapists – list + specialisation + approval
+   Supports ?search= &status=
+   --------------------------------------------------------- */
+app.get(
+  "/api/admin/therapists",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const search = String(req.query.search || "").trim();
+      const status = String(req.query.status || "").trim();
+
+      const result = await db.query(
+        `
+          SELECT
+            u.id, u.username, u.email, u.first_name, u.last_name,
+            u.image_url, u.provider, u.created_at,
+            p.specialization, p.age, p.mood,
+            p.approval_status, p.approved_at
+          FROM users u
+          LEFT JOIN therapist_profiles p
+            ON p.user_id::text = u.id::text
+          WHERE u.role = 'therapist'
+            AND ($1 = '' OR COALESCE(p.approval_status, 'pending') = $1)
+            AND (
+              $2 = ''
+              OR LOWER(COALESCE(u.username, '')) LIKE LOWER('%' || $2 || '%')
+              OR LOWER(u.email) LIKE LOWER('%' || $2 || '%')
+              OR LOWER(COALESCE(p.specialization, '')) LIKE LOWER('%' || $2 || '%')
+            )
+          ORDER BY
+            CASE COALESCE(p.approval_status, 'pending')
+              WHEN 'pending' THEN 0
+              WHEN 'approved' THEN 1
+              ELSE 2
+            END,
+            u.created_at DESC
+        `,
+        [status, search]
+      );
+
+      const therapists = result.rows.map((row) => ({
+        id: row.id,
+        username: row.username,
+        email: row.email,
+        name:
+          [row.first_name, row.last_name]
+            .filter(Boolean)
+            .join(" ") ||
+          row.username ||
+          row.email,
+        imageUrl: row.image_url,
+        provider: row.provider,
+
+        // The specialisation picked during onboarding.
+        specialization: row.specialization || "",
+        age: row.age,
+        mood: row.mood,
+
+        approvalStatus: row.approval_status || "pending",
+        approvedAt: row.approved_at,
+        createdAt: row.created_at,
+      }));
+
+      return res.json({
+        success: true,
+        therapists,
+        count: therapists.length,
+      });
+    } catch (error) {
+      console.error("Admin therapists error:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to load therapists",
+      });
+    }
+  }
+);
+
+
+/* ---------------------------------------------------------
+   POST /api/admin/therapists/:id/approval – approve / reject
+   --------------------------------------------------------- */
+const ADMIN_APPROVAL_STATUSES = [
+  "pending",
+  "approved",
+  "rejected",
+];
+
+app.post(
+  "/api/admin/therapists/:id/approval",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const status = String(req.body?.status || "")
+        .trim()
+        .toLowerCase();
+
+      if (!ADMIN_APPROVAL_STATUSES.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "status must be one of: " +
+            ADMIN_APPROVAL_STATUSES.join(", "),
+        });
+      }
+
+      const therapistId = String(req.params.id || "");
+
+      if (!therapistId) {
+        return res.status(400).json({
+          success: false,
+          error: "A therapist id is required",
+        });
+      }
+
+      // The target must really be a therapist - never approve a user account.
+      const owner = await db.query(
+        `
+          SELECT id
+          FROM users
+          WHERE id = $1 AND role = 'therapist'
+          LIMIT 1
+        `,
+        [therapistId]
+      );
+
+      if (!owner.rows.length) {
+        return res.status(404).json({
+          success: false,
+          error: "Therapist not found",
+        });
+      }
+
+      /*
+       * `approved_at` / `approved_by` are computed here rather than with a
+       * SQL CASE: the CASE compared the same parameter against a literal
+       * ('approved' = text) while also binding it to a varchar column, which
+       * Postgres rejects with 42P08 "inconsistent types deduced".
+       */
+      const isApproved = status === "approved";
+      const approvedAt = isApproved ? new Date() : null;
+      const approvedBy = isApproved ? req.user.id : null;
+
+      /*
+       * Upsert. A therapist can be approved before finishing onboarding, so
+       * there may be no profile row yet.
+       *
+       * `user_id` is text (not uuid) in the live schema, so the value is bound
+       * as-is and joins cast with ::text on both sides.
+       */
+      await db.query(
+        `
+          INSERT INTO therapist_profiles
+            (user_id, specialization, approval_status,
+             approved_at, approved_by, created_at, updated_at)
+          VALUES
+            ($1, '', $2, $3, $4, NOW(), NOW())
+          ON CONFLICT (user_id) DO UPDATE
+          SET approval_status = EXCLUDED.approval_status,
+              approved_at = EXCLUDED.approved_at,
+              approved_by = EXCLUDED.approved_by,
+              updated_at = NOW()
+        `,
+        [therapistId, status, approvedAt, approvedBy]
+      );
+
+      const updated = await db.query(
+        `
+          SELECT
+            p.specialization, p.approval_status, p.approved_at
+          FROM therapist_profiles p
+          WHERE p.user_id::text = $1::text
+          LIMIT 1
+        `,
+        [therapistId]
+      );
+
+      return res.json({
+        success: true,
+        therapist: {
+          id: therapistId,
+          specialization: updated.rows[0]?.specialization || "",
+          approvalStatus:
+            updated.rows[0]?.approval_status || status,
+          approvedAt: updated.rows[0]?.approved_at || null,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Admin therapist approval error:",
+        error
+      );
+      return res.status(500).json({
+        success: false,
+        error: "Failed to update the approval",
+      });
+    }
+  }
+);
+
+
+/* ---------------------------------------------------------
+   GET /api/admin/earnings – revenue breakdown
+   --------------------------------------------------------- */
+app.get(
+  "/api/admin/earnings",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const appointments = await getAppointments();
+
+      return res.json({
+        success: true,
+        earnings: buildEarningsReport(appointments),
+      });
+    } catch (error) {
+      console.error("Admin earnings error:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to load earnings",
+      });
+    }
+  }
+);
+
 
 app.get(
   "/api/health",
