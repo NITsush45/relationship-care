@@ -4975,6 +4975,37 @@ server.listen(
       );
     }
 
+    /*
+     * Admin access is allowlisted by email. An EMPTY list fails closed -
+     * every admin request is refused with "This account is not permitted to
+     * use the admin dashboard" - which looks like a broken dashboard rather
+     * than a missing setting, so it is called out here at boot.
+     */
+    if (ADMIN_EMAILS.size === 0) {
+      console.warn(
+        "======================================================"
+      );
+      console.warn(
+        "ADMIN EMAILS IS EMPTY - the admin dashboard is LOCKED."
+      );
+      console.warn(
+        "Every admin request is refused until you set it, e.g."
+      );
+      console.warn(
+        "  ADMIN_EMAILS=you@example.com,other@example.com"
+      );
+      console.warn(
+        "in server/.env and restart. (Intended: nobody gets admin.)"
+      );
+      console.warn(
+        "======================================================"
+      );
+    } else {
+      console.log(
+        `Admin allowlist: ${ADMIN_EMAILS.size} address(es) loaded.`
+      );
+    }
+
     /* "Error 400: redirect_uri_mismatch" means the URI logged
        above is not listed byte-for-byte in the Google Cloud
        Console (APIs & Services -> Credentials -> OAuth 2.0
